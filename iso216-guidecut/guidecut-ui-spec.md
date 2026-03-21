@@ -13,7 +13,7 @@ Initial pass focuses on collecting required script inputs, optional output-direc
 - Supports manual keyboard path entry.
 - Supports file navigation/browse dialog.
 2. Target format dropdown:
-- Lists supported values: `a3`, `a2`, `a1`, `a0`.
+- Lists supported values as uppercase display labels: `A3`, `A2`, `A1`, `A0`.
 3. Run button:
 - Executes the script using selected file path + selected format.
 4. Optional output directory controls:
@@ -40,20 +40,43 @@ Initial pass focuses on collecting required script inputs, optional output-direc
 - Advanced export options.
 - Visual preview of tile layout.
 
-## 4. UI Layout (v1)
-Top-to-bottom layout:
-1. Usage instructions (short static text).
-2. `Input File` label.
-3. File path text field (single-line editable).
-4. `Browse...` button (opens file picker dialog).
-5. `Target Format` label.
-6. Format dropdown (`a3`, `a2`, `a1`, `a0`) with adjacent info/tooltip trigger.
-7. `Specify output directory` toggle (checkbox/switch).
-8. `Output Directory` text field (hidden by default, visible when toggle is enabled).
-9. `Browse Output...` button (hidden with output-directory field).
-10. `Open Folder` button.
-11. `Run` button.
-12. Status/output area (read-only text region for success/errors).
+## 4. Layout
+Current layout in the implemented UI:
+
+### 4.1 Window and Container Structure
+- The main window contains one root app frame and one primary panel frame.
+- The primary panel is the only content column and fills the available window width and height.
+- The panel uses a 3-column grid:
+  - Column 0: field labels.
+  - Column 1: primary input controls (expands horizontally).
+  - Column 2: auxiliary actions (`Browse...`, info button, etc.).
+
+### 4.2 Row-by-Row Element Placement
+1. Row 0: usage instructions label, spanning all 3 columns.
+2. Row 1: `Input File` label (col 0), rounded input field (col 1), `Browse...` button (col 2).
+3. Row 3: `Specify output directory` toggle, spanning all 3 columns.
+4. Row 4: output-directory row (hidden by default), spanning all 3 columns.
+- Inside row 4:
+  - rounded output-directory field (expanding left section),
+  - `Browse Output...` button (right section).
+5. Row 5: action row, spanning all 3 columns.
+- Inside row 5:
+  - compact `Target Format` cluster at the left edge:
+    - `Target Format` label,
+    - fixed-width rounded dropdown (non-expanding) sized tightly to its clickable area,
+    - info tooltip button placed immediately next to the dropdown with minimal gap.
+  - flexible spacer between target-format cluster and action buttons,
+  - `Open Folder` button,
+  - `Run` button on the far right.
+6. Row 6: status/output region, spanning all 3 columns and expanding vertically.
+
+### 4.3 Resize Behavior
+- The panel expands with the window.
+- Primary field column (column 1) grows horizontally.
+- Status/output region (row 6) takes additional vertical space.
+- Layout must not include an unused expanding right-side spacer area.
+- Target-format dropdown width remains fixed and does not stretch with window resize.
+- Target-format dropdown must not render non-clickable dead padding inside its visual bounds.
 
 ## 5. Field Behavior
 ### 5.1 File Path Field
@@ -75,15 +98,16 @@ Top-to-bottom layout:
 
 ### 5.3 Format Dropdown
 - Required selection.
-- Values restricted to `a3|a2|a1|a0`.
-- Default selection: `a2`.
+- Display values restricted to `A3|A2|A1|A0`.
+- Default selection: `A2`.
+- Internal format handling remains case-insensitive and normalizes to canonical lowercase for script invocation.
 - Adjacent tooltip trigger (for example `i` icon) is required.
 - Tooltip activates on cursor hover.
 - Tooltip content reflects current selected format:
-  - `a3`: `2` tiles/pages, sheet area is `2x A4`.
-  - `a2`: `4` tiles/pages, sheet area is `4x A4`.
-  - `a1`: `8` tiles/pages, sheet area is `8x A4`.
-  - `a0`: `16` tiles/pages, sheet area is `16x A4`.
+  - `A3`: `2` tiles/pages, sheet area is `2x A4`.
+  - `A2`: `4` tiles/pages, sheet area is `4x A4`.
+  - `A1`: `8` tiles/pages, sheet area is `8x A4`.
+  - `A0`: `16` tiles/pages, sheet area is `16x A4`.
 - Tooltip content must update immediately when format selection changes.
 
 ### 5.4 Run Button

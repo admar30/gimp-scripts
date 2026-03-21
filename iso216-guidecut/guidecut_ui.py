@@ -416,7 +416,7 @@ class GuidecutApp(tk.Tk):
         self.minsize(760, 460)
 
         self.input_var = tk.StringVar()
-        self.target_var = tk.StringVar(value="a2")
+        self.target_var = tk.StringVar(value="A2")
         self.specify_output_var = tk.BooleanVar(value=False)
         self.output_dir_var = tk.StringVar()
 
@@ -500,60 +500,6 @@ class GuidecutApp(tk.Tk):
             pady=(0, SPACING["sm"]),
         )
 
-        ttk.Label(panel, text="Target Format", style="Form.TLabel").grid(
-            row=2,
-            column=0,
-            sticky="w",
-            padx=(0, SPACING["sm"]),
-            pady=(0, SPACING["sm"]),
-        )
-        self.target_field = RoundedField(panel, radius=RADIUS["sm"], fill=COLORS["bg.input"])
-        self.target_field.grid(row=2, column=1, sticky="ew", pady=(0, SPACING["sm"]))
-        self.target_menu_button = tk.Menubutton(
-            self.target_field.inner,
-            textvariable=self.target_var,
-            bg=COLORS["bg.input"],
-            fg=COLORS["text.primary"],
-            activebackground=COLORS["bg.input"],
-            activeforeground=COLORS["text.primary"],
-            relief=tk.FLAT,
-            borderwidth=0,
-            highlightthickness=0,
-            font=FONTS["body"],
-            anchor="w",
-            padx=SPACING["sm"],
-            pady=SPACING["xs"],
-        )
-        self.target_menu = tk.Menu(
-            self.target_menu_button,
-            tearoff=0,
-            bg=COLORS["bg.input"],
-            fg=COLORS["text.primary"],
-            activebackground=COLORS["action.secondary"],
-            activeforeground=COLORS["text.inverse"],
-            relief=tk.SOLID,
-            borderwidth=1,
-            font=FONTS["body"],
-        )
-        for fmt in SUPPORTED_FORMATS:
-            self.target_menu.add_radiobutton(label=fmt.upper(), value=fmt, variable=self.target_var)
-        self.target_menu_button.configure(menu=self.target_menu)
-        self.target_menu_button.pack(fill="x", expand=True, padx=SPACING["sm"], pady=SPACING["xs"])
-        self.target_field.bind_focus_widget(self.target_menu_button)
-
-        self.info_button = RoundedButton(
-            panel,
-            text="i",
-            command=lambda: None,
-            variant="secondary",
-            radius=RADIUS["sm"],
-            min_width=34,
-            takefocus=True,
-        )
-        self.info_button.grid(row=2, column=2, padx=(SPACING["sm"], 0), pady=(0, SPACING["sm"]), sticky="e")
-        self.info_tooltip = HoverTooltip(self.info_button, self._format_tooltip_text)
-        self.target_var.trace_add("write", lambda *_args: self.info_tooltip.refresh())
-
         self.output_toggle = ttk.Checkbutton(
             panel,
             text="Specify output directory",
@@ -595,7 +541,64 @@ class GuidecutApp(tk.Tk):
 
         button_row = ttk.Frame(panel, style="Panel.TFrame")
         button_row.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(0, SPACING["sm"]))
-        button_row.columnconfigure(0, weight=1)
+        button_row.columnconfigure(1, weight=1)
+
+        target_cluster = ttk.Frame(button_row, style="Panel.TFrame")
+        target_cluster.grid(row=0, column=0, sticky="w")
+        ttk.Label(target_cluster, text="Target Format", style="Form.TLabel").grid(
+            row=0,
+            column=0,
+            sticky="w",
+            padx=(0, SPACING["xs"]),
+        )
+        self.target_field = RoundedField(target_cluster, radius=RADIUS["sm"], fill=COLORS["bg.input"])
+        self.target_field.grid(row=0, column=1, sticky="w")
+        self.target_field.canvas.configure(width=60)
+        self.target_menu_button = tk.Menubutton(
+            self.target_field.inner,
+            textvariable=self.target_var,
+            bg=COLORS["bg.input"],
+            fg=COLORS["text.primary"],
+            activebackground=COLORS["bg.input"],
+            activeforeground=COLORS["text.primary"],
+            relief=tk.FLAT,
+            borderwidth=0,
+            highlightthickness=0,
+            font=FONTS["body"],
+            anchor="w",
+            padx=2,
+            pady=SPACING["xs"],
+        )
+        self.target_menu = tk.Menu(
+            self.target_menu_button,
+            tearoff=0,
+            bg=COLORS["bg.input"],
+            fg=COLORS["text.primary"],
+            activebackground=COLORS["action.secondary"],
+            activeforeground=COLORS["text.inverse"],
+            relief=tk.SOLID,
+            borderwidth=1,
+            font=FONTS["body"],
+        )
+        for fmt in SUPPORTED_FORMATS:
+            display_fmt = fmt.upper()
+            self.target_menu.add_radiobutton(label=display_fmt, value=display_fmt, variable=self.target_var)
+        self.target_menu_button.configure(menu=self.target_menu)
+        self.target_menu_button.pack(fill="x", expand=True, padx=2, pady=SPACING["xs"], anchor="w")
+        self.target_field.bind_focus_widget(self.target_menu_button)
+
+        self.info_button = RoundedButton(
+            target_cluster,
+            text="i",
+            command=lambda: None,
+            variant="secondary",
+            radius=RADIUS["sm"],
+            min_width=26,
+            takefocus=True,
+        )
+        self.info_button.grid(row=0, column=2, padx=(2, 0), sticky="w")
+        self.info_tooltip = HoverTooltip(self.info_button, self._format_tooltip_text)
+        self.target_var.trace_add("write", lambda *_args: self.info_tooltip.refresh())
         self.open_button = RoundedButton(
             button_row,
             text="Open Folder",
@@ -604,7 +607,7 @@ class GuidecutApp(tk.Tk):
             radius=RADIUS["sm"],
             min_width=120,
         )
-        self.open_button.grid(row=0, column=1, padx=(SPACING["sm"], 0))
+        self.open_button.grid(row=0, column=2, padx=(SPACING["sm"], 0))
         self.run_button = RoundedButton(
             button_row,
             text="Run",
@@ -613,7 +616,7 @@ class GuidecutApp(tk.Tk):
             radius=RADIUS["sm"],
             min_width=90,
         )
-        self.run_button.grid(row=0, column=2, padx=(SPACING["sm"], 0))
+        self.run_button.grid(row=0, column=3, padx=(SPACING["sm"], 0))
 
         status_container = ttk.Frame(panel, style="Status.TFrame", padding=1)
         status_container.grid(row=6, column=0, columnspan=3, sticky="nsew")
@@ -650,7 +653,7 @@ class GuidecutApp(tk.Tk):
             self._startup_warnings.append(str(exc))
             return
 
-        self.target_var.set(state["target_format"])
+        self.target_var.set(state["target_format"].upper())
         self.specify_output_var.set(bool(state["specify_output_dir"]))
         self.output_dir_var.set(state["output_dir"])
 
