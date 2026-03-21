@@ -36,14 +36,23 @@ Launch the desktop UI:
 python iso216-guidecut/guidecut_ui.py
 ```
 
-UI features in current pass:
-- Input file path by typing or browse dialog
-- Target format selector (`a3`, `a2`, `a1`, `a0`) with hover tooltip details
-- Optional explicit output directory (auto-created if missing)
-- `Run` with background execution (UI stays responsive)
-- `Open Folder` for source/output directory (Windows/macOS supported)
-- Post-run workflow keeps the source folder in the input field for faster next-file selection
-- Remembers target format and output settings between app restarts
+UI interactions in current pass:
+- Input path supports manual typing and `Browse...` file picker.
+- Target format selector supports `A3`, `A2`, `A1`, `A0` with an adjacent tooltip button showing tiles/pages and A4-relative size.
+- `Specify output directory` toggle reveals/hides explicit output controls.
+- Output directory supports manual typing and `Browse Output...`; missing directories are auto-created on run.
+- `Open Folder` resolves to explicit output directory when enabled and set, otherwise resolves from input path (file parent or folder path).
+- `Run` executes in a background thread and streams stdout/stderr to the status panel.
+- Post-run input behavior keeps only the source folder path (filename cleared) to speed up selecting the next file.
+- `Show preview` toggle appears only when `Input File` resolves to an existing file.
+- Enabling preview opens a right-side preview panel, expanding the app to the right without compressing left-side controls.
+- Preview panel includes a draggable vertical divider for resizing UI-vs-preview width allocation.
+- Preview panel auto-fits width to rendered content on open and avoids cumulative window-size drift across reopen/restart cycles.
+- Preview displays guide overlays for the selected target format and updates when target format changes.
+- Guide overlays use adaptive contrast sampling (with optional halo stroke) for visibility on dark/light/mixed documents.
+- Preview redraw during resize is responsive; heavier contrast recompute is deferred until resize settles.
+- Preview toggle state is not persisted; it resets off/hidden on startup when no valid file is selected.
+- Persistent settings on close/reopen: target format, output toggle/value, input-folder context, window geometry (size/position), and preview split ratio.
 
 ### Supported targets
 - `a3`
