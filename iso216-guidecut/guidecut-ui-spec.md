@@ -1,6 +1,6 @@
 # Guidecut UI Specification
 
-Status: Draft v0.5  
+Status: Draft v0.7  
 Date: 2026-03-21
 
 ## 1. Purpose
@@ -31,11 +31,13 @@ Initial pass focuses on collecting required script inputs, optional output-direc
 7. Usage instructions:
 - Show a short usage hint above the input field.
 - Keep instruction text concise and always visible.
+8. Session persistence:
+- On app close, persist selected target format and output settings.
+- On next app launch, restore persisted target format and output settings.
 
 ## 3. Non-Goals (Initial Pass)
 - Batch mode (multiple files).
 - Advanced export options.
-- Settings persistence.
 - Visual preview of tile layout.
 
 ## 4. UI Layout (v1)
@@ -64,6 +66,10 @@ Top-to-bottom layout:
 
 ### 5.2 Browse Button
 - Opens native file picker.
+- Default open location:
+  - If input field currently contains a folder path, open that folder.
+  - If input field contains a file path, open its parent folder.
+  - Otherwise use system default.
 - On file selection, writes absolute path into path field.
 - User can still edit the populated path manually.
 
@@ -104,7 +110,8 @@ Top-to-bottom layout:
 
 ### 5.6 Post-Run State Behavior
 - After each run attempt (success or failure):
-  - Clear `Input File` field.
+  - Remove filename from `Input File` value and keep only source folder path.
+  - This retained folder path becomes the default `Browse...` location for selecting the next file.
   - Keep currently selected `Target Format`.
   - Keep `Specify output directory` toggle state.
   - Keep `Output Directory` field value unchanged.
@@ -112,7 +119,9 @@ Top-to-bottom layout:
 ### 5.7 Open Folder Button
 - Resolves target folder with this priority:
   - If `Specify output directory` is enabled and `Output Directory` is non-empty, use `Output Directory`.
-  - Otherwise, use parent folder of `Input File`.
+  - Otherwise, use folder represented by `Input File` value:
+    - if `Input File` is a file path, use its parent
+    - if `Input File` is already a folder path, use that folder
 - On click:
   - Open the resolved folder in the system file explorer.
   - Support Windows and macOS.
@@ -126,6 +135,16 @@ Top-to-bottom layout:
   - choose target format
   - optional output directory
   - run
+
+### 5.9 Persistence Across App Restart
+- Persist these values on app close:
+  - `Target Format`
+  - `Specify output directory` toggle state
+  - `Output Directory` value
+- Restore these values on startup.
+- Do not persist `Input File` path.
+- If persisted data is missing/invalid:
+  - fall back to defaults (`a2`, toggle off, empty output directory).
 
 ## 6. Script Integration Contract
 Base command form:
@@ -158,6 +177,7 @@ Execution details:
 - Unsupported format: should not occur via dropdown, but still handle script error gracefully.
 - Script runtime failure: show error output in status area.
 - Missing Python/runtime/script file: show actionable error text.
+- Persisted-state load/save failure: log warning in status area and continue with defaults/current state.
 
 ## 8. Accessibility and UX Baseline
 - Keyboard navigation support:
@@ -176,13 +196,15 @@ Execution details:
 5. When output-directory field is empty, output defaults to source file location.
 6. `Run` invokes `iso216_guidecut.py` with correct parameters, including optional `--output` only when needed.
 7. UI displays both success output and error output from the script.
-8. After each run, input path is cleared while target format and output-directory settings are preserved.
+8. After each run, input field retains only source folder path (filename removed), and `Browse...` opens from that folder.
 9. `Open Folder` opens source folder by default and explicit output directory when selected.
 10. Hovering format tooltip control shows the selected format's tile count and A4-relative size.
 11. A simple usage instruction block is visible above the input field.
+12. After app restart, target format and output settings are restored from previous session.
 
 ## 10. Suggested Implementation Notes
 - Recommended stack for first implementation: Python `tkinter` (no extra dependency).
 - Keep UI logic separate from process execution logic:
   - `ui.py` for widgets and event wiring.
   - `runner.py` for command construction/execution.
+- Persist settings in a small local JSON file (for example `guidecut_ui_state.json` in the tool directory or user config path).

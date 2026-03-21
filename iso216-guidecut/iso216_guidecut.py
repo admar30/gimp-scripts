@@ -11,6 +11,7 @@ Author: Adrian Mariani - 21-03-2026
 from __future__ import annotations
 
 import argparse
+import math
 import sys
 from dataclasses import dataclass
 from datetime import datetime
@@ -26,6 +27,8 @@ TARGET_SPLITS = {
     "a1": 3,
     "a0": 4,
 }
+
+ISO216_ASPECT_RATIO = math.sqrt(2.0)
 
 
 @dataclass(frozen=True)
@@ -101,6 +104,13 @@ def compute_tile_crop(
 
 def ordered_tiles(cols: int, rows: int) -> list[tuple[int, int]]:
     return [(col, row) for row in range(rows) for col in range(cols)]
+
+
+def is_near_iso216_ratio(width_px: int, height_px: int, tolerance: float = 0.03) -> bool:
+    if width_px <= 0 or height_px <= 0:
+        return False
+    ratio = max(width_px, height_px) / min(width_px, height_px)
+    return abs(ratio - ISO216_ASPECT_RATIO) <= tolerance
 
 
 def build_output_path(input_path: Path, target: str, now_local: datetime | None = None) -> Path:
@@ -285,6 +295,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         orientation = detect_orientation(width_px, height_px)
         cols, rows = compute_grid(target, orientation)
         v_guides, h_guides = compute_guides(width_px, height_px, cols, rows)
+        warnings: list[str] = []
+
+        if not is_near_iso216_ratio(width_px, height_px):
+            warnings.append(
+                "Source dimensions are non-ISO ratio; continuing with guide split based on source canvas."
+            )
 
         tile_indices = ordered_tiles(cols, rows)
         rects = [
@@ -292,12 +308,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             for col, row in tile_indices
         ]
 
-        warnings = export_tiles_to_multipage_pdf(
+        warnings.extend(
+            export_tiles_to_multipage_pdf(
             image=src,
             ordered_rects=rects,
             output_path=output_path,
             preserve_profile=True,
             preserve_metadata=True,
+        )
         )
     except Exception as exc:  # noqa: BLE001
         print(str(exc), file=sys.stderr)

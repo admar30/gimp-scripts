@@ -11,3 +11,6 @@ tmp*/
 
 # Output artifacts
 *.pdf
+
+# UI local state
+iso216-guidecut/guidecut_ui_state.json

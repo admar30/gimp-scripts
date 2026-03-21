@@ -1,6 +1,6 @@
 # Guidecut UI Theme Specification
 
-Status: Draft v0.1  
+Status: Draft v0.3  
 Date: 2026-03-21
 
 ## 1. Purpose
@@ -16,25 +16,26 @@ Define a visual/theme system for the Guidecut UI that improves readability, hier
 - Base on `ttk` style overrides (no custom widget framework).
 - Support `light` first; add optional `dark` extension later.
 - Centralize colors, spacing, and type in a token map.
+- Visual direction for this pass: slightly darker overall with a teal-forward accent palette.
 
 ## 4. Design Tokens (Light Theme)
 ## 4.1 Color Tokens
-- `bg.app`: `#F5F7FA`
-- `bg.panel`: `#FFFFFF`
-- `bg.input`: `#FFFFFF`
-- `bg.tooltip`: `#FFF7D6`
-- `text.primary`: `#1F2933`
-- `text.secondary`: `#52606D`
+- `bg.app`: `#DCE8EA`
+- `bg.panel`: `#EAF2F3`
+- `bg.input`: `#F2F8F8`
+- `bg.tooltip`: `#D6F0EE`
+- `text.primary`: `#16363B`
+- `text.secondary`: `#2F5A60`
 - `text.inverse`: `#FFFFFF`
-- `border.default`: `#CBD2D9`
-- `border.focus`: `#2563EB`
-- `state.success`: `#047857`
-- `state.warning`: `#B45309`
-- `state.error`: `#B42318`
-- `action.primary`: `#2563EB`
-- `action.primary.hover`: `#1D4ED8`
-- `action.secondary`: `#334155`
-- `action.secondary.hover`: `#1E293B`
+- `border.default`: `#8DA8AE`
+- `border.focus`: `#0F8F84`
+- `state.success`: `#0C7A56`
+- `state.warning`: `#9A5A0A`
+- `state.error`: `#A22A2A`
+- `action.primary`: `#0F766E`
+- `action.primary.hover`: `#0B5E57`
+- `action.secondary`: `#245A61`
+- `action.secondary.hover`: `#1B464C`
 
 ## 4.2 Spacing Tokens
 - `space.xs`: `4`
@@ -43,7 +44,11 @@ Define a visual/theme system for the Guidecut UI that improves readability, hier
 - `space.lg`: `16`
 - `space.xl`: `24`
 
-## 4.3 Typography Tokens
+## 4.3 Radius Tokens
+- `radius.sm`: `8` (input fields and dropdown)
+- `radius.md`: `10` (optional larger controls)
+
+## 4.4 Typography Tokens
 - Font family: platform-default sans (`Segoe UI` on Windows, `SF Pro`/system on macOS).
 - `font.body`: 10-11 pt
 - `font.label`: 10-11 pt semibold
@@ -58,6 +63,7 @@ Define a visual/theme system for the Guidecut UI that improves readability, hier
 
 ## 5.2 Inputs
 - Entry and combobox background `bg.input`.
+- Entry and combobox should use rounded corners (`radius.sm`).
 - Focus ring/border uses `border.focus`.
 - Invalid input adds red border + optional short inline message.
 
@@ -79,7 +85,7 @@ Define a visual/theme system for the Guidecut UI that improves readability, hier
   - A4 size multiple
 
 ## 5.5 Status Output
-- Background: very light neutral (`#F8FAFC`).
+- Background: very light teal-neutral (`#EAF3F4`).
 - Stdout text uses `text.primary`.
 - Stderr text uses `state.error`.
 - Prefix stderr lines with `ERROR:` (already implemented).

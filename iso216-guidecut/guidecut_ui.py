@@ -16,19 +16,25 @@ from tkinter.scrolledtext import ScrolledText
 
 from guidecut_runner import (
     SUPPORTED_FORMATS,
+    browse_initial_directory,
     build_command,
     build_output_pdf_path,
+    load_ui_state,
     normalize_target_format,
     open_folder,
+    retained_input_value_after_run,
     resolve_open_folder,
     resolve_output_directory,
     run_command_streaming,
+    save_ui_state,
     tooltip_text_for_format,
 )
+from guidecut_theme import COLORS, FONTS, RADIUS, SPACING, apply_ttk_theme
 
 
 SCRIPT_PATH = Path(__file__).with_name("iso216_guidecut.py")
 SCRIPT_CWD = SCRIPT_PATH.parent
+STATE_PATH = SCRIPT_CWD / "guidecut_ui_state.json"
 
 
 class HoverTooltip:
@@ -59,13 +65,16 @@ class HoverTooltip:
             self._window,
             text=text,
             justify=tk.LEFT,
-            background="#FFFFE0",
+            background=COLORS["bg.tooltip"],
+            foreground=COLORS["text.primary"],
+            font=FONTS["help"],
             relief=tk.SOLID,
             borderwidth=1,
-            padx=6,
-            pady=4,
+            padx=SPACING["sm"],
+            pady=SPACING["xs"],
         )
         self._label.pack()
+        self._window.configure(background=COLORS["border.default"])
 
     def _hide(self, _event=None) -> None:
         if self._window is None:
@@ -77,6 +86,122 @@ class HoverTooltip:
     def refresh(self) -> None:
         if self._label is not None:
             self._label.configure(text=self.text_provider())
+
+
+class RoundedField(ttk.Frame):
+    def __init__(
+        self,
+        parent: tk.Widget,
+        *,
+        radius: int = 8,
+        height: int = 36,
+        fill: str = COLORS["bg.input"],
+        background: str = COLORS["bg.panel"],
+    ) -> None:
+        super().__init__(parent, style="Panel.TFrame")
+        self.radius = radius
+        self.height = height
+        self.fill = fill
+        self.background = background
+        self._focused = False
+        self._error = False
+
+        self.canvas = tk.Canvas(
+            self,
+            height=height,
+            highlightthickness=0,
+            borderwidth=0,
+            bg=background,
+        )
+        self.canvas.pack(fill="both", expand=True)
+        self.inner = tk.Frame(self.canvas, bg=fill, highlightthickness=0, borderwidth=0)
+        self._window_id = self.canvas.create_window(0, 0, anchor="nw", window=self.inner)
+        self.canvas.bind("<Configure>", self._on_configure)
+        self._draw()
+
+    def bind_focus_widget(self, widget: tk.Widget) -> None:
+        widget.bind("<FocusIn>", lambda _e: self.set_focused(True), add=True)
+        widget.bind("<FocusOut>", lambda _e: self.set_focused(False), add=True)
+
+    def set_focused(self, focused: bool) -> None:
+        self._focused = focused
+        self._draw()
+
+    def set_error(self, has_error: bool) -> None:
+        self._error = has_error
+        self._draw()
+
+    def _border_color(self) -> str:
+        if self._error:
+            return COLORS["state.error"]
+        if self._focused:
+            return COLORS["border.focus"]
+        return COLORS["border.default"]
+
+    @staticmethod
+    def _rounded_points(x1: int, y1: int, x2: int, y2: int, r: int) -> list[int]:
+        return [
+            x1 + r,
+            y1,
+            x1 + r,
+            y1,
+            x2 - r,
+            y1,
+            x2 - r,
+            y1,
+            x2,
+            y1,
+            x2,
+            y1 + r,
+            x2,
+            y1 + r,
+            x2,
+            y2 - r,
+            x2,
+            y2 - r,
+            x2,
+            y2,
+            x2 - r,
+            y2,
+            x2 - r,
+            y2,
+            x1 + r,
+            y2,
+            x1 + r,
+            y2,
+            x1,
+            y2,
+            x1,
+            y2 - r,
+            x1,
+            y2 - r,
+            x1,
+            y1 + r,
+            x1,
+            y1 + r,
+            x1,
+            y1,
+        ]
+
+    def _draw(self) -> None:
+        self.canvas.delete("shape")
+        width = max(self.canvas.winfo_width(), 2 * self.radius + 4)
+        height = max(self.canvas.winfo_height(), self.height)
+        points = self._rounded_points(1, 1, width - 1, height - 1, self.radius)
+        self.canvas.create_polygon(
+            points,
+            smooth=True,
+            fill=self.fill,
+            outline=self._border_color(),
+            width=1,
+            tags="shape",
+        )
+        inset = 3
+        self.canvas.coords(self._window_id, inset, inset)
+        self.canvas.itemconfigure(self._window_id, width=max(1, width - 2 * inset), height=max(1, height - 2 * inset))
+
+    def _on_configure(self, _event=None) -> None:
+        self._draw()
 
 
 class GuidecutApp(tk.Tk):
@@ -92,82 +217,158 @@ class GuidecutApp(tk.Tk):
 
         self._event_queue: queue.Queue[tuple[str, str]] = queue.Queue()
         self._run_thread: threading.Thread | None = None
+        self._last_run_input_path: Path | None = None
+        self._startup_warnings: list[str] = []
 
+        self._style = apply_ttk_theme(self)
+        self._load_persisted_state()
         self._build_ui()
+        self._toggle_output_controls()
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+        for warning in self._startup_warnings:
+            self._append_status(f"Warning: {warning}")
         self.after(100, self._drain_queue)
 
     def _build_ui(self) -> None:
         self.columnconfigure(0, weight=1)
         self.rowconfigure(0, weight=1)
 
-        root = ttk.Frame(self, padding=12)
+        root = ttk.Frame(self, style="App.TFrame", padding=SPACING["md"])
         root.grid(row=0, column=0, sticky="nsew")
         root.columnconfigure(1, weight=1)
         root.rowconfigure(6, weight=1)
+
+        panel = ttk.Frame(root, style="Panel.TFrame", padding=SPACING["md"])
+        panel.grid(row=0, column=0, sticky="nsew")
+        panel.columnconfigure(1, weight=1)
+        panel.rowconfigure(6, weight=1)
+        root.rowconfigure(0, weight=1)
+        root.columnconfigure(0, weight=1)
 
         usage_text = (
             "Usage: 1) Choose an input file. 2) Select target format. "
             "3) Optionally set output directory. 4) Click Run."
         )
-        ttk.Label(root, text=usage_text, justify=tk.LEFT, wraplength=720).grid(
+        ttk.Label(panel, text=usage_text, style="Help.TLabel", justify=tk.LEFT, wraplength=720).grid(
             row=0,
             column=0,
             columnspan=3,
             sticky="w",
-            pady=(0, 10),
+            pady=(0, SPACING["md"]),
         )
 
-        ttk.Label(root, text="Input File").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=(0, 8))
-        self.input_entry = ttk.Entry(root, textvariable=self.input_var)
-        self.input_entry.grid(row=1, column=1, sticky="ew", pady=(0, 8))
-        ttk.Button(root, text="Browse...", command=self._browse_input).grid(
+        ttk.Label(panel, text="Input File", style="Form.TLabel").grid(
+            row=1,
+            column=0,
+            sticky="w",
+            padx=(0, SPACING["sm"]),
+            pady=(0, SPACING["sm"]),
+        )
+        self.input_field = RoundedField(panel, radius=RADIUS["sm"], fill=COLORS["bg.input"])
+        self.input_field.grid(row=1, column=1, sticky="ew", pady=(0, SPACING["sm"]))
+        self.input_entry = ttk.Entry(self.input_field.inner, textvariable=self.input_var, style="Flat.TEntry")
+        self.input_entry.pack(fill="both", expand=True, padx=SPACING["sm"], pady=SPACING["xs"])
+        self.input_entry.configure(font=FONTS["body"])
+        self.input_field.bind_focus_widget(self.input_entry)
+        ttk.Button(panel, text="Browse...", style="Secondary.TButton", command=self._browse_input).grid(
             row=1,
             column=2,
-            padx=(8, 0),
-            pady=(0, 8),
+            padx=(SPACING["sm"], 0),
+            pady=(0, SPACING["sm"]),
         )
 
-        ttk.Label(root, text="Target Format").grid(row=2, column=0, sticky="w", padx=(0, 8), pady=(0, 8))
+        ttk.Label(panel, text="Target Format", style="Form.TLabel").grid(
+            row=2,
+            column=0,
+            sticky="w",
+            padx=(0, SPACING["sm"]),
+            pady=(0, SPACING["sm"]),
+        )
+        self.target_field = RoundedField(panel, radius=RADIUS["sm"], fill=COLORS["bg.input"])
+        self.target_field.grid(row=2, column=1, sticky="ew", pady=(0, SPACING["sm"]))
         self.target_combo = ttk.Combobox(
-            root,
+            self.target_field.inner,
             textvariable=self.target_var,
             values=list(SUPPORTED_FORMATS),
             state="readonly",
+            style="Flat.TCombobox",
+            font=FONTS["body"],
         )
-        self.target_combo.grid(row=2, column=1, sticky="ew", pady=(0, 8))
+        self.target_combo.pack(fill="both", expand=True, padx=SPACING["sm"], pady=SPACING["xs"])
+        self.target_field.bind_focus_widget(self.target_combo)
 
-        self.info_button = ttk.Button(root, text="i", width=3, command=lambda: None, takefocus=True)
-        self.info_button.grid(row=2, column=2, padx=(8, 0), pady=(0, 8), sticky="e")
+        self.info_button = ttk.Button(
+            panel,
+            text="i",
+            width=3,
+            style="Secondary.TButton",
+            command=lambda: None,
+            takefocus=True,
+        )
+        self.info_button.grid(row=2, column=2, padx=(SPACING["sm"], 0), pady=(0, SPACING["sm"]), sticky="e")
         self.info_tooltip = HoverTooltip(self.info_button, self._format_tooltip_text)
         self.target_var.trace_add("write", lambda *_args: self.info_tooltip.refresh())
 
         self.output_toggle = ttk.Checkbutton(
-            root,
+            panel,
             text="Specify output directory",
             variable=self.specify_output_var,
             command=self._toggle_output_controls,
         )
-        self.output_toggle.grid(row=3, column=0, columnspan=3, sticky="w", pady=(0, 8))
+        self.output_toggle.grid(row=3, column=0, columnspan=3, sticky="w", pady=(0, SPACING["sm"]))
 
-        self.output_row = ttk.Frame(root)
-        self.output_row.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(0, 8))
+        self.output_row = ttk.Frame(panel, style="Panel.TFrame")
+        self.output_row.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(0, SPACING["sm"]))
         self.output_row.columnconfigure(0, weight=1)
-        self.output_entry = ttk.Entry(self.output_row, textvariable=self.output_dir_var)
-        self.output_entry.grid(row=0, column=0, sticky="ew")
-        self.output_browse = ttk.Button(self.output_row, text="Browse Output...", command=self._browse_output)
-        self.output_browse.grid(row=0, column=1, padx=(8, 0))
+        self.output_field = RoundedField(self.output_row, radius=RADIUS["sm"], fill=COLORS["bg.input"])
+        self.output_field.grid(row=0, column=0, sticky="ew")
+        self.output_entry = ttk.Entry(self.output_field.inner, textvariable=self.output_dir_var, style="Flat.TEntry")
+        self.output_entry.pack(fill="both", expand=True, padx=SPACING["sm"], pady=SPACING["xs"])
+        self.output_entry.configure(font=FONTS["body"])
+        self.output_field.bind_focus_widget(self.output_entry)
+        self.output_browse = ttk.Button(
+            self.output_row,
+            text="Browse Output...",
+            style="Secondary.TButton",
+            command=self._browse_output,
+        )
+        self.output_browse.grid(row=0, column=1, padx=(SPACING["sm"], 0))
         self.output_row.grid_remove()
 
-        button_row = ttk.Frame(root)
-        button_row.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(0, 8))
+        button_row = ttk.Frame(panel, style="Panel.TFrame")
+        button_row.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(0, SPACING["sm"]))
         button_row.columnconfigure(0, weight=1)
-        self.open_button = ttk.Button(button_row, text="Open Folder", command=self._open_folder)
-        self.open_button.grid(row=0, column=1, padx=(8, 0))
-        self.run_button = ttk.Button(button_row, text="Run", command=self._run)
-        self.run_button.grid(row=0, column=2, padx=(8, 0))
+        self.open_button = ttk.Button(
+            button_row,
+            text="Open Folder",
+            style="Secondary.TButton",
+            command=self._open_folder,
+        )
+        self.open_button.grid(row=0, column=1, padx=(SPACING["sm"], 0))
+        self.run_button = ttk.Button(button_row, text="Run", style="Primary.TButton", command=self._run)
+        self.run_button.grid(row=0, column=2, padx=(SPACING["sm"], 0))
 
-        self.status = ScrolledText(root, wrap=tk.WORD, height=14, state=tk.DISABLED)
-        self.status.grid(row=6, column=0, columnspan=3, sticky="nsew")
+        status_container = ttk.Frame(panel, style="Status.TFrame", padding=1)
+        status_container.grid(row=6, column=0, columnspan=3, sticky="nsew")
+        status_container.columnconfigure(0, weight=1)
+        status_container.rowconfigure(0, weight=1)
+
+        self.status = ScrolledText(
+            status_container,
+            wrap=tk.WORD,
+            height=14,
+            state=tk.DISABLED,
+            relief=tk.FLAT,
+            borderwidth=0,
+            background=COLORS["bg.status"],
+            foreground=COLORS["text.primary"],
+            insertbackground=COLORS["text.primary"],
+            font=FONTS["status"],
+            highlightthickness=0,
+        )
+        self.status.grid(row=0, column=0, sticky="nsew")
+        self.status.tag_configure("stdout", foreground=COLORS["text.primary"])
+        self.status.tag_configure("stderr", foreground=COLORS["state.error"])
 
     def _format_tooltip_text(self) -> str:
         try:
@@ -175,15 +376,44 @@ class GuidecutApp(tk.Tk):
         except ValueError:
             return "Unsupported format."
 
+    def _load_persisted_state(self) -> None:
+        try:
+            state = load_ui_state(STATE_PATH)
+        except RuntimeError as exc:
+            self._startup_warnings.append(str(exc))
+            return
+
+        self.target_var.set(state["target_format"])
+        self.specify_output_var.set(bool(state["specify_output_dir"]))
+        self.output_dir_var.set(state["output_dir"])
+
+    def _on_close(self) -> None:
+        try:
+            save_ui_state(
+                STATE_PATH,
+                target_format=self.target_var.get(),
+                specify_output_dir=self.specify_output_var.get(),
+                output_dir=self.output_dir_var.get(),
+            )
+        except RuntimeError as exc:
+            self._append_status(f"Warning: {exc}")
+        self.destroy()
+
     def _browse_input(self) -> None:
-        file_path = filedialog.askopenfilename()
+        dialog_kwargs: dict[str, str] = {}
+        initial_dir = browse_initial_directory(self.input_var.get())
+        if initial_dir:
+            dialog_kwargs["initialdir"] = initial_dir
+        file_path = filedialog.askopenfilename(**dialog_kwargs)
         if file_path:
             self.input_var.set(file_path)
+            self.input_field.set_error(False)
 
     def _browse_output(self) -> None:
         folder = filedialog.askdirectory()
         if folder:
             self.output_dir_var.set(folder)
+            self.output_field.set_error(False)
 
     def _toggle_output_controls(self) -> None:
         if self.specify_output_var.get():
@@ -199,16 +429,24 @@ class GuidecutApp(tk.Tk):
         self.status.configure(state=tk.DISABLED)
         self.status.see(tk.END)
 
+    def _clear_validation(self) -> None:
+        self.input_field.set_error(False)
+        self.output_field.set_error(False)
+
     def _resolve_run_inputs(self) -> tuple[Path, str, Path | None]:
+        self._clear_validation()
+
         if not SCRIPT_PATH.exists():
             raise ValueError(f"Script not found: {SCRIPT_PATH}")
 
         input_text = self.input_var.get().strip()
         if not input_text:
+            self.input_field.set_error(True)
             raise ValueError("Input file is required.")
 
         input_path = Path(input_text).expanduser().resolve()
         if not input_path.exists() or not input_path.is_file():
+            self.input_field.set_error(True)
             raise ValueError(f"Input path does not exist or is not a file: {input_path}")
 
         target = normalize_target_format(self.target_var.get())
@@ -224,6 +462,7 @@ class GuidecutApp(tk.Tk):
         try:
             output_dir.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
+            self.output_field.set_error(True)
             raise ValueError(f"Unable to create output directory '{output_dir}': {exc}") from exc
 
         output_pdf = build_output_pdf_path(
@@ -251,6 +490,7 @@ class GuidecutApp(tk.Tk):
             target_format=target,
             output_path=output_path,
         )
+        self._last_run_input_path = input_path
 
         display_command = " ".join(shlex.quote(part) for part in command)
         self._append_status("-" * 60)
@@ -310,7 +550,10 @@ class GuidecutApp(tk.Tk):
                 else:
                     self._append_status(f"Run failed with exit code {code}.", error=True)
                 self.run_button.state(["!disabled"])
-                self.input_var.set("")
+                if self._last_run_input_path is not None:
+                    self.input_var.set(retained_input_value_after_run(self._last_run_input_path))
+                else:
+                    self.input_var.set("")
                 self.input_entry.focus_set()
 
         self.after(100, self._drain_queue)

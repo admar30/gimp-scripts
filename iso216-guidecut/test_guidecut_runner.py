@@ -8,14 +8,21 @@ from pathlib import Path
 import pytest
 
 from guidecut_runner import (
+    DEFAULT_UI_STATE,
+    browse_initial_directory,
     build_command,
     build_output_pdf_path,
+    load_ui_state,
     normalize_target_format,
     open_folder,
     open_folder_command,
+    resolve_input_folder_from_field,
     resolve_open_folder,
     resolve_output_directory,
+    retained_input_value_after_run,
     run_command_streaming,
+    save_ui_state,
+    sanitize_ui_state,
     tooltip_text_for_format,
 )
 
@@ -58,6 +65,117 @@ def test_resolve_output_directory_enabled_but_empty_uses_input_parent() -> None:
     input_path = Path("C:/input/poster.png")
     resolved = resolve_output_directory(input_path, explicit_enabled=True, explicit_dir_value=" ")
     assert resolved == Path("C:/input").resolve()
+
+
+def test_retained_input_value_after_run_returns_parent() -> None:
+    value = retained_input_value_after_run(Path("C:/maps/arena.avif"))
+    assert value == str(Path("C:/maps").resolve())
+
+
+def test_resolve_input_folder_from_field_nonexistent_file_path_returns_parent() -> None:
+    resolved = resolve_input_folder_from_field("C:/maps/arena.avif")
+    assert resolved == Path("C:/maps").resolve()
+
+
+def test_resolve_input_folder_from_field_nonexistent_dir_path_returns_dir() -> None:
+    resolved = resolve_input_folder_from_field("C:/maps/")
+    assert resolved == Path("C:/maps").resolve()
+
+
+def test_resolve_input_folder_from_field_existing_directory(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_exists(self: Path) -> bool:
+        return str(self).replace("\\", "/").endswith("/in/maps")
+
+    def fake_is_dir(self: Path) -> bool:
+        return fake_exists(self)
+
+    monkeypatch.setattr(Path, "exists", fake_exists, raising=False)
+    monkeypatch.setattr(Path, "is_dir", fake_is_dir, raising=False)
+
+    resolved = resolve_input_folder_from_field("C:/in/maps")
+    assert str(resolved).replace("\\", "/").endswith("/in/maps")
+
+
+def test_browse_initial_directory_none_for_empty_or_non_existing() -> None:
+    assert browse_initial_directory("") is None
+    assert browse_initial_directory("C:/missing/nope.avif") is None
+
+
+def test_browse_initial_directory_returns_existing_folder(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_exists(self: Path) -> bool:
+        return str(self).replace("\\", "/").endswith("/maps")
+
+    def fake_is_dir(self: Path) -> bool:
+        return fake_exists(self)
+
+    monkeypatch.setattr(Path, "exists", fake_exists, raising=False)
+    monkeypatch.setattr(Path, "is_dir", fake_is_dir, raising=False)
+
+    result = browse_initial_directory("C:/maps")
+    assert result is not None
+    assert result.replace("\\", "/").endswith("/maps")
+
+
+def test_sanitize_ui_state_defaults_on_bad_values() -> None:
+    state = sanitize_ui_state(
+        {
+            "target_format": "a9",
+            "specify_output_dir": "notabool",
+            "output_dir": None,
+        }
+    )
+    assert state["target_format"] == DEFAULT_UI_STATE["target_format"]
+    assert state["specify_output_dir"] is False
+    assert state["output_dir"] == ""
+
+
+def test_save_and_load_ui_state_round_trip(monkeypatch: pytest.MonkeyPatch) -> None:
+    state_path = Path("C:/state/guidecut_ui_state.json")
+    storage: dict[str, str] = {}
+
+    def fake_mkdir(self: Path, *args, **kwargs):  # noqa: ANN002, ANN003
+        return None
+
+    def fake_write_text(self: Path, text: str, *args, **kwargs) -> int:  # noqa: ANN002, ANN003
+        storage[str(self)] = text
+        return len(text)
+
+    def fake_exists(self: Path) -> bool:
+        return str(self) in storage
+
+    def fake_read_text(self: Path, *args, **kwargs) -> str:  # noqa: ANN002, ANN003
+        return storage[str(self)]
+
+    monkeypatch.setattr(Path, "mkdir", fake_mkdir, raising=False)
+    monkeypatch.setattr(Path, "write_text", fake_write_text, raising=False)
+    monkeypatch.setattr(Path, "exists", fake_exists, raising=False)
+    monkeypatch.setattr(Path, "read_text", fake_read_text, raising=False)
+
+    save_ui_state(
+        state_path,
+        target_format="A1",
+        specify_output_dir=True,
+        output_dir="C:/out",
+    )
+    loaded = load_ui_state(state_path)
+    assert loaded["target_format"] == "a1"
+    assert loaded["specify_output_dir"] is True
+    assert loaded["output_dir"] == "C:/out"
+
+
+def test_load_ui_state_returns_defaults_when_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    missing = Path("C:/state/missing_state.json")
+    monkeypatch.setattr(Path, "exists", lambda _self: False, raising=False)
+    loaded = load_ui_state(missing)
+    assert loaded == DEFAULT_UI_STATE
+
+
+def test_load_ui_state_raises_on_invalid_json(monkeypatch: pytest.MonkeyPatch) -> None:
+    state_path = Path("C:/state/bad_state.json")
+    monkeypatch.setattr(Path, "exists", lambda _self: True, raising=False)
+    monkeypatch.setattr(Path, "read_text", lambda _self, **_kwargs: "{", raising=False)
+    with pytest.raises(RuntimeError):
+        load_ui_state(state_path)
 
 
 def test_build_output_pdf_path_uses_timestamp_and_collision_suffix(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -136,6 +254,24 @@ def test_resolve_open_folder_falls_back_to_input_parent() -> None:
         explicit_dir_value="",
     )
     assert folder == Path("C:/in").resolve()
+
+
+def test_resolve_open_folder_uses_input_folder_when_path_is_directory(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_exists(self: Path) -> bool:
+        return str(self).replace("\\", "/").endswith("/in/maps")
+
+    def fake_is_dir(self: Path) -> bool:
+        return fake_exists(self)
+
+    monkeypatch.setattr(Path, "exists", fake_exists, raising=False)
+    monkeypatch.setattr(Path, "is_dir", fake_is_dir, raising=False)
+
+    folder = resolve_open_folder(
+        input_path_value="C:/in/maps",
+        explicit_enabled=False,
+        explicit_dir_value="",
+    )
+    assert str(folder).replace("\\", "/").endswith("/in/maps")
 
 
 def test_resolve_open_folder_errors_when_no_inputs() -> None:

@@ -42,6 +42,8 @@ UI features in current pass:
 - Optional explicit output directory (auto-created if missing)
 - `Run` with background execution (UI stays responsive)
 - `Open Folder` for source/output directory (Windows/macOS supported)
+- Post-run workflow keeps the source folder in the input field for faster next-file selection
+- Remembers target format and output settings between app restarts
 
 ### Supported targets
 - `a3`

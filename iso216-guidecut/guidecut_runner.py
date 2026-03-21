@@ -5,6 +5,7 @@ Runner helpers for the ISO216 Guidecut UI.
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 import threading
@@ -22,6 +23,12 @@ FORMAT_DETAILS = {
     "a2": {"tiles": 4, "a4_multiple": 4},
     "a1": {"tiles": 8, "a4_multiple": 8},
     "a0": {"tiles": 16, "a4_multiple": 16},
+}
+
+DEFAULT_UI_STATE = {
+    "target_format": "a2",
+    "specify_output_dir": False,
+    "output_dir": "",
 }
 
 
@@ -87,16 +94,122 @@ def build_command(
     return command
 
 
+def retained_input_value_after_run(input_path: Path) -> str:
+    return str(input_path.parent.resolve())
+
+
+def _resolve_path_lenient(path: Path) -> Path:
+    try:
+        return path.resolve()
+    except OSError:
+        return path.absolute()
+
+
+def resolve_input_folder_from_field(input_path_value: str) -> Path:
+    input_text = input_path_value.strip()
+    if not input_text:
+        raise ValueError("Input path is empty.")
+
+    raw = Path(input_text).expanduser()
+    candidate = _resolve_path_lenient(raw)
+
+    if candidate.exists():
+        return candidate if candidate.is_dir() else candidate.parent
+
+    if input_text.endswith(("\\", "/")):
+        return candidate
+    if candidate.suffix:
+        return candidate.parent
+    return candidate
+
+
+def browse_initial_directory(input_path_value: str) -> str | None:
+    if not input_path_value.strip():
+        return None
+    try:
+        folder = resolve_input_folder_from_field(input_path_value)
+    except ValueError:
+        return None
+    if folder.exists() and folder.is_dir():
+        return str(folder)
+    return None
+
+
+def _coerce_bool(value) -> bool:  # noqa: ANN001
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"1", "true", "yes", "on"}:
+            return True
+        if lowered in {"0", "false", "no", "off"}:
+            return False
+    return False
+
+
+def sanitize_ui_state(raw: dict | None) -> dict:
+    state = dict(DEFAULT_UI_STATE)
+    if not isinstance(raw, dict):
+        return state
+
+    target = raw.get("target_format", state["target_format"])
+    try:
+        state["target_format"] = normalize_target_format(str(target))
+    except ValueError:
+        state["target_format"] = DEFAULT_UI_STATE["target_format"]
+
+    state["specify_output_dir"] = _coerce_bool(raw.get("specify_output_dir", state["specify_output_dir"]))
+    output_dir = raw.get("output_dir", state["output_dir"])
+    state["output_dir"] = str(output_dir).strip() if output_dir is not None else ""
+    return state
+
+
+def load_ui_state(state_path: Path) -> dict:
+    if not state_path.exists():
+        return dict(DEFAULT_UI_STATE)
+
+    try:
+        raw = json.loads(state_path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise RuntimeError(f"Unable to read UI state file '{state_path}': {exc}") from exc
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"UI state file is invalid JSON ('{state_path}'): {exc}") from exc
+
+    return sanitize_ui_state(raw)
+
+
+def save_ui_state(
+    state_path: Path,
+    *,
+    target_format: str,
+    specify_output_dir: bool,
+    output_dir: str,
+) -> None:
+    state = sanitize_ui_state(
+        {
+            "target_format": target_format,
+            "specify_output_dir": specify_output_dir,
+            "output_dir": output_dir,
+        }
+    )
+    try:
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path.write_text(json.dumps(state, indent=2, sort_keys=True), encoding="utf-8")
+    except OSError as exc:
+        raise RuntimeError(f"Unable to save UI state file '{state_path}': {exc}") from exc
+
+
 def resolve_open_folder(input_path_value: str, explicit_enabled: bool, explicit_dir_value: str) -> Path:
     explicit_dir = explicit_dir_value.strip()
     if explicit_enabled and explicit_dir:
         return Path(explicit_dir).expanduser().resolve()
 
-    input_text = input_path_value.strip()
-    if not input_text:
+    if not input_path_value.strip():
         raise ValueError("No folder can be resolved. Provide an input file or explicit output directory.")
 
-    return Path(input_text).expanduser().resolve().parent
+    return resolve_input_folder_from_field(input_path_value)
 
 
 def open_folder_command(folder: Path, platform_name: str | None = None) -> list[str]:

@@ -11,6 +11,7 @@ from iso216_guidecut import (
     compute_guides,
     compute_tile_crop,
     detect_orientation,
+    is_near_iso216_ratio,
     ordered_tiles,
     parse_target_format,
 )
@@ -96,3 +97,11 @@ def test_build_output_path_uses_timestamp_and_suffix(monkeypatch: pytest.MonkeyP
     occupied.add(first.name)
     second = build_output_path(input_path, "a2", now_local=now)
     assert second.name == "poster-guidecut-a2-20260321-123456-1.pdf"
+
+
+def test_is_near_iso216_ratio_true_for_a4_shape() -> None:
+    assert is_near_iso216_ratio(2480, 3508)
+
+
+def test_is_near_iso216_ratio_false_for_wide_shape() -> None:
+    assert not is_near_iso216_ratio(1920, 1080)
