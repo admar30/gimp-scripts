@@ -16,7 +16,10 @@ from guidecut_runner import (
     normalize_target_format,
     open_folder,
     open_folder_command,
+    effective_preview_state,
+    preview_guides_for_source,
     resolve_input_folder_from_field,
+    resolve_existing_input_file,
     resolve_open_folder,
     resolve_output_directory,
     retained_input_value_after_run,
@@ -96,6 +99,63 @@ def test_resolve_input_folder_from_field_existing_directory(monkeypatch: pytest.
 
     resolved = resolve_input_folder_from_field("C:/in/maps")
     assert str(resolved).replace("\\", "/").endswith("/in/maps")
+
+
+def test_resolve_existing_input_file_returns_none_for_empty_or_missing() -> None:
+    assert resolve_existing_input_file("") is None
+    assert resolve_existing_input_file("C:/missing/nope.avif") is None
+
+
+def test_resolve_existing_input_file_returns_path_for_existing_file(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_exists(self: Path) -> bool:
+        return str(self).replace("\\", "/").endswith("/in/maps/arena.avif")
+
+    def fake_is_file(self: Path) -> bool:
+        return fake_exists(self)
+
+    monkeypatch.setattr(Path, "exists", fake_exists, raising=False)
+    monkeypatch.setattr(Path, "is_file", fake_is_file, raising=False)
+
+    resolved = resolve_existing_input_file("C:/in/maps/arena.avif")
+    assert resolved is not None
+    assert str(resolved).replace("\\", "/").endswith("/in/maps/arena.avif")
+
+
+def test_effective_preview_state_for_missing_input() -> None:
+    visible, enabled, file_path = effective_preview_state("C:/missing/nope.avif", True)
+    assert visible is False
+    assert enabled is False
+    assert file_path is None
+
+
+def test_effective_preview_state_for_existing_file(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_exists(self: Path) -> bool:
+        return str(self).replace("\\", "/").endswith("/in/maps/arena.avif")
+
+    def fake_is_file(self: Path) -> bool:
+        return fake_exists(self)
+
+    monkeypatch.setattr(Path, "exists", fake_exists, raising=False)
+    monkeypatch.setattr(Path, "is_file", fake_is_file, raising=False)
+
+    visible, enabled, file_path = effective_preview_state("C:/in/maps/arena.avif", True)
+    assert visible is True
+    assert enabled is True
+    assert file_path is not None
+
+
+def test_preview_guides_for_source_uses_orientation_and_target_grid() -> None:
+    cols, rows, vertical, horizontal = preview_guides_for_source(1000, 500, "A2")
+    assert cols == 2
+    assert rows == 2
+    assert vertical == [500]
+    assert horizontal == [250]
+
+    cols, rows, vertical, horizontal = preview_guides_for_source(500, 1000, "A3")
+    assert cols == 1
+    assert rows == 2
+    assert vertical == []
+    assert horizontal == [500]
 
 
 def test_browse_initial_directory_none_for_empty_or_non_existing() -> None:

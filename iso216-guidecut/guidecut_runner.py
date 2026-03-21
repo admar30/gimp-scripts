@@ -14,7 +14,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Sequence
 
-from iso216_guidecut import parse_target_format
+from iso216_guidecut import compute_grid, compute_guides, detect_orientation, parse_target_format
 
 
 SUPPORTED_FORMATS = ("a3", "a2", "a1", "a0")
@@ -124,6 +124,37 @@ def resolve_input_folder_from_field(input_path_value: str) -> Path:
     if candidate.suffix:
         return candidate.parent
     return candidate
+
+
+def resolve_existing_input_file(input_path_value: str) -> Path | None:
+    input_text = input_path_value.strip()
+    if not input_text:
+        return None
+
+    raw = Path(input_text).expanduser()
+    candidate = _resolve_path_lenient(raw)
+    if candidate.exists() and candidate.is_file():
+        return candidate
+    return None
+
+
+def effective_preview_state(input_path_value: str, show_preview_requested: bool) -> tuple[bool, bool, Path | None]:
+    file_path = resolve_existing_input_file(input_path_value)
+    if file_path is None:
+        return False, False, None
+    return True, bool(show_preview_requested), file_path
+
+
+def preview_guides_for_source(
+    width_px: int,
+    height_px: int,
+    target_format: str,
+) -> tuple[int, int, list[int], list[int]]:
+    target = normalize_target_format(target_format)
+    orientation = detect_orientation(width_px, height_px)
+    cols, rows = compute_grid(target, orientation)
+    vertical, horizontal = compute_guides(width_px, height_px, cols, rows)
+    return cols, rows, vertical, horizontal
 
 
 def browse_initial_directory(input_path_value: str) -> str | None:

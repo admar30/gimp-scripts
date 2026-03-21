@@ -14,15 +14,20 @@ from pathlib import Path
 from tkinter import filedialog, ttk
 from tkinter.scrolledtext import ScrolledText
 
+from PIL import Image, ImageOps, ImageTk
+
 from guidecut_runner import (
     SUPPORTED_FORMATS,
     browse_initial_directory,
     build_command,
     build_output_pdf_path,
+    effective_preview_state,
     load_ui_state,
     normalize_target_format,
     open_folder,
+    preview_guides_for_source,
     retained_input_value_after_run,
+    resolve_existing_input_file,
     resolve_open_folder,
     resolve_output_directory,
     run_command_streaming,
@@ -419,17 +424,27 @@ class GuidecutApp(tk.Tk):
         self.target_var = tk.StringVar(value="A2")
         self.specify_output_var = tk.BooleanVar(value=False)
         self.output_dir_var = tk.StringVar()
+        self.show_preview_var = tk.BooleanVar(value=False)
 
-        self._event_queue: queue.Queue[tuple[str, str]] = queue.Queue()
+        self._event_queue: queue.Queue[tuple[str, object]] = queue.Queue()
         self._run_thread: threading.Thread | None = None
         self._last_run_input_path: Path | None = None
         self._startup_warnings: list[str] = []
         self._pending_window_geometry: str = ""
+        self._preview_panel_visible = False
+        self._preview_source_path: Path | None = None
+        self._preview_source_image: Image.Image | None = None
+        self._preview_tk_image: ImageTk.PhotoImage | None = None
+        self._preview_loading_path: Path | None = None
+        self._preview_load_request_id = 0
 
         self._style = apply_ttk_theme(self)
         self._load_persisted_state()
         self._build_ui()
+        self.input_var.trace_add("write", self._on_input_path_changed)
+        self.target_var.trace_add("write", self._on_target_changed)
         self._toggle_output_controls()
+        self._sync_preview_controls()
         self._apply_persisted_window_geometry()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         for warning in self._startup_warnings:
@@ -440,15 +455,17 @@ class GuidecutApp(tk.Tk):
         self.columnconfigure(0, weight=1)
         self.rowconfigure(0, weight=1)
 
-        root = ttk.Frame(self, style="App.TFrame", padding=SPACING["md"])
-        root.grid(row=0, column=0, sticky="nsew")
+        self.root_container = ttk.Frame(self, style="App.TFrame", padding=SPACING["md"])
+        self.root_container.grid(row=0, column=0, sticky="nsew")
+        self.root_container.rowconfigure(0, weight=1)
+        self.root_container.columnconfigure(0, weight=3)
+        self.root_container.columnconfigure(1, weight=0)
 
-        panel = ttk.Frame(root, style="Panel.TFrame", padding=SPACING["md"])
+        panel = ttk.Frame(self.root_container, style="Panel.TFrame", padding=SPACING["md"])
         panel.grid(row=0, column=0, sticky="nsew")
         panel.columnconfigure(1, weight=1)
         panel.rowconfigure(6, weight=1)
-        root.rowconfigure(0, weight=1)
-        root.columnconfigure(0, weight=1)
+        self.panel = panel
 
         usage_text = (
             "Usage: 1) Choose an input file. 2) Select target format. "
@@ -500,6 +517,15 @@ class GuidecutApp(tk.Tk):
             padx=(SPACING["sm"], 0),
             pady=(0, SPACING["sm"]),
         )
+
+        self.preview_toggle = ttk.Checkbutton(
+            panel,
+            text="Show preview",
+            variable=self.show_preview_var,
+            command=self._on_preview_toggle,
+        )
+        self.preview_toggle.grid(row=2, column=2, sticky="e", pady=(0, SPACING["sm"]))
+        self.preview_toggle.grid_remove()
 
         self.output_toggle = ttk.Checkbutton(
             panel,
@@ -599,7 +625,6 @@ class GuidecutApp(tk.Tk):
         )
         self.info_button.grid(row=0, column=2, padx=(2, 0), sticky="w")
         self.info_tooltip = HoverTooltip(self.info_button, self._format_tooltip_text)
-        self.target_var.trace_add("write", lambda *_args: self.info_tooltip.refresh())
         self.open_button = RoundedButton(
             button_row,
             text="Open Folder",
@@ -641,11 +666,265 @@ class GuidecutApp(tk.Tk):
         self.status.tag_configure("stdout", foreground=COLORS["text.primary"])
         self.status.tag_configure("stderr", foreground=COLORS["state.error"])
 
+        self.preview_panel = ttk.Frame(self.root_container, style="Panel.TFrame", padding=SPACING["md"])
+        self.preview_panel.columnconfigure(0, weight=1)
+        self.preview_panel.rowconfigure(1, weight=1)
+
+        ttk.Label(self.preview_panel, text="Cut Preview", style="Form.TLabel").grid(row=0, column=0, sticky="w")
+
+        self.preview_canvas = tk.Canvas(
+            self.preview_panel,
+            bg=COLORS["bg.input"],
+            highlightthickness=0,
+            borderwidth=0,
+        )
+        self.preview_canvas.grid(row=1, column=0, sticky="nsew", pady=(SPACING["sm"], SPACING["xs"]))
+        self.preview_canvas.bind("<Configure>", self._on_preview_canvas_configure, add=True)
+
+        self.preview_status_var = tk.StringVar(value="Preview hidden.")
+        ttk.Label(
+            self.preview_panel,
+            textvariable=self.preview_status_var,
+            style="Help.TLabel",
+            justify=tk.LEFT,
+            wraplength=280,
+        ).grid(row=2, column=0, sticky="w")
+        self.preview_panel.grid_remove()
+
     def _format_tooltip_text(self) -> str:
         try:
             return tooltip_text_for_format(self.target_var.get())
         except ValueError:
             return "Unsupported format."
+
+    @staticmethod
+    def _resample_filter() -> int:
+        if hasattr(Image, "Resampling"):
+            return Image.Resampling.LANCZOS
+        return Image.LANCZOS
+
+    def _set_preview_status(self, message: str) -> None:
+        self.preview_status_var.set(message)
+
+    def _clear_preview_canvas(self) -> None:
+        self.preview_canvas.delete("all")
+        self._preview_tk_image = None
+
+    def _close_preview_source(self) -> None:
+        if self._preview_source_image is not None:
+            try:
+                self._preview_source_image.close()
+            except Exception:  # noqa: BLE001
+                pass
+        self._preview_source_image = None
+        self._preview_source_path = None
+
+    def _show_preview_panel(self) -> None:
+        if self._preview_panel_visible:
+            return
+        self.root_container.columnconfigure(1, weight=2, minsize=280)
+        self.preview_panel.grid(row=0, column=1, sticky="nsew", padx=(SPACING["sm"], 0))
+        self._preview_panel_visible = True
+
+    def _hide_preview_panel(self) -> None:
+        if not self._preview_panel_visible:
+            return
+        self.preview_panel.grid_remove()
+        self.root_container.columnconfigure(1, weight=0, minsize=0)
+        self._preview_panel_visible = False
+        self._clear_preview_canvas()
+
+    def _on_target_changed(self, *_args) -> None:
+        self.info_tooltip.refresh()
+        if self.show_preview_var.get() and self._preview_source_image is not None:
+            self._render_preview()
+
+    def _on_input_path_changed(self, *_args) -> None:
+        self._sync_preview_controls()
+
+    def _on_preview_toggle(self) -> None:
+        self._sync_preview_controls()
+
+    def _sync_preview_controls(self) -> None:
+        toggle_visible, preview_enabled, file_path = effective_preview_state(
+            self.input_var.get(),
+            self.show_preview_var.get(),
+        )
+
+        if toggle_visible:
+            self.preview_toggle.grid()
+        else:
+            self.preview_toggle.grid_remove()
+
+        if self.show_preview_var.get() != preview_enabled:
+            self.show_preview_var.set(preview_enabled)
+
+        if not preview_enabled or file_path is None:
+            # Invalidate any in-flight preview load when preview is unavailable.
+            self._preview_load_request_id += 1
+            self._preview_loading_path = None
+            self._hide_preview_panel()
+            self._set_preview_status("Preview hidden.")
+            return
+
+        self._show_preview_panel()
+        self._ensure_preview_for_file(file_path)
+
+    def _ensure_preview_for_file(self, file_path: Path) -> None:
+        if self._preview_source_path == file_path and self._preview_source_image is not None:
+            self._render_preview()
+            return
+        if self._preview_loading_path == file_path:
+            return
+        self._request_preview_load(file_path)
+
+    def _request_preview_load(self, file_path: Path) -> None:
+        self._preview_load_request_id += 1
+        request_id = self._preview_load_request_id
+        self._preview_loading_path = file_path
+        self._clear_preview_canvas()
+        self._set_preview_status(f"Loading preview: {file_path.name}")
+        thread = threading.Thread(
+            target=self._preview_load_worker,
+            args=(request_id, file_path),
+            daemon=True,
+        )
+        thread.start()
+
+    def _preview_load_worker(self, request_id: int, file_path: Path) -> None:
+        try:
+            with Image.open(file_path) as source:
+                try:
+                    source.seek(0)
+                except EOFError:
+                    pass
+                corrected = ImageOps.exif_transpose(source)
+                corrected.load()
+                preview_image = corrected.convert("RGB")
+        except Exception as exc:  # noqa: BLE001
+            self._event_queue.put(
+                (
+                    "preview_error",
+                    {
+                        "request_id": request_id,
+                        "path": str(file_path),
+                        "error": str(exc),
+                    },
+                )
+            )
+            return
+
+        self._event_queue.put(
+            (
+                "preview_loaded",
+                {
+                    "request_id": request_id,
+                    "path": str(file_path),
+                    "image": preview_image,
+                },
+            )
+        )
+
+    def _handle_preview_loaded(self, payload: dict[str, object]) -> None:
+        request_id = int(payload["request_id"])
+        image = payload["image"]
+        if not isinstance(image, Image.Image):
+            return
+        if request_id != self._preview_load_request_id:
+            image.close()
+            return
+
+        self._preview_loading_path = None
+        loaded_path = Path(str(payload["path"]))
+        current_input = resolve_existing_input_file(self.input_var.get())
+        if not self.show_preview_var.get() or current_input != loaded_path:
+            image.close()
+            return
+
+        self._close_preview_source()
+        self._preview_source_image = image
+        self._preview_source_path = loaded_path
+        self._render_preview()
+
+    def _handle_preview_error(self, payload: dict[str, object]) -> None:
+        request_id = int(payload["request_id"])
+        if request_id != self._preview_load_request_id:
+            return
+        self._preview_loading_path = None
+        error_text = str(payload["error"])
+        self._clear_preview_canvas()
+        self._set_preview_status(f"Unable to preview file: {error_text}")
+
+    def _on_preview_canvas_configure(self, _event=None) -> None:
+        if self.show_preview_var.get() and self._preview_source_image is not None:
+            self._render_preview()
+
+    def _render_preview(self) -> None:
+        if not self._preview_panel_visible or self._preview_source_image is None:
+            return
+
+        canvas_w = self.preview_canvas.winfo_width()
+        canvas_h = self.preview_canvas.winfo_height()
+        if canvas_w <= 4 or canvas_h <= 4:
+            return
+
+        source_w, source_h = self._preview_source_image.size
+        if source_w <= 0 or source_h <= 0:
+            self._clear_preview_canvas()
+            self._set_preview_status("Unable to preview file: invalid image dimensions.")
+            return
+
+        scale = min(canvas_w / source_w, canvas_h / source_h)
+        display_w = max(1, int(source_w * scale))
+        display_h = max(1, int(source_h * scale))
+        offset_x = (canvas_w - display_w) // 2
+        offset_y = (canvas_h - display_h) // 2
+
+        resized = self._preview_source_image.resize((display_w, display_h), self._resample_filter())
+        self._preview_tk_image = ImageTk.PhotoImage(resized)
+        self.preview_canvas.delete("all")
+        self.preview_canvas.create_image(offset_x, offset_y, anchor="nw", image=self._preview_tk_image)
+
+        cols, rows, vertical_guides, horizontal_guides = preview_guides_for_source(
+            source_w,
+            source_h,
+            self.target_var.get(),
+        )
+        ratio_x = display_w / source_w
+        ratio_y = display_h / source_h
+        for guide_x in vertical_guides:
+            x = offset_x + (guide_x * ratio_x)
+            self.preview_canvas.create_line(
+                x,
+                offset_y,
+                x,
+                offset_y + display_h,
+                fill=COLORS["border.focus"],
+                width=1,
+                dash=(6, 4),
+            )
+        for guide_y in horizontal_guides:
+            y = offset_y + (guide_y * ratio_y)
+            self.preview_canvas.create_line(
+                offset_x,
+                y,
+                offset_x + display_w,
+                y,
+                fill=COLORS["border.focus"],
+                width=1,
+                dash=(6, 4),
+            )
+
+        self.preview_canvas.create_rectangle(
+            offset_x,
+            offset_y,
+            offset_x + display_w,
+            offset_y + display_h,
+            outline=COLORS["border.default"],
+            width=1,
+        )
+        source_name = self._preview_source_path.name if self._preview_source_path is not None else "Preview"
+        self._set_preview_status(f"{source_name} ({source_w}x{source_h}px) | Grid {cols}x{rows}")
 
     def _load_persisted_state(self) -> None:
         try:
@@ -680,6 +959,8 @@ class GuidecutApp(tk.Tk):
             return ""
 
     def _on_close(self) -> None:
+        self._preview_load_request_id += 1
+        self._close_preview_source()
         try:
             save_ui_state(
                 STATE_PATH,
@@ -811,7 +1092,7 @@ class GuidecutApp(tk.Tk):
         except Exception as exc:  # noqa: BLE001
             self._event_queue.put(("stderr", str(exc)))
             code = 1
-        self._event_queue.put(("done", str(code)))
+        self._event_queue.put(("done", code))
 
     def _open_folder(self) -> None:
         try:
@@ -829,16 +1110,16 @@ class GuidecutApp(tk.Tk):
     def _drain_queue(self) -> None:
         while True:
             try:
-                channel, text = self._event_queue.get_nowait()
+                channel, payload = self._event_queue.get_nowait()
             except queue.Empty:
                 break
 
             if channel == "stdout":
-                self._append_status(text)
+                self._append_status(str(payload))
             elif channel == "stderr":
-                self._append_status(text, error=True)
+                self._append_status(str(payload), error=True)
             elif channel == "done":
-                code = int(text)
+                code = int(payload)
                 if code == 0:
                     self._append_status("Run completed successfully.")
                 else:
@@ -849,6 +1130,12 @@ class GuidecutApp(tk.Tk):
                 else:
                     self.input_var.set("")
                 self.input_entry.focus_set()
+            elif channel == "preview_loaded":
+                if isinstance(payload, dict):
+                    self._handle_preview_loaded(payload)
+            elif channel == "preview_error":
+                if isinstance(payload, dict):
+                    self._handle_preview_error(payload)
 
         self.after(100, self._drain_queue)
 
