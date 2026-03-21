@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local scratch/temp artifacts
+.tmp/
+.pytest_tmp/
+pytest-cache-files-*/
+tmp*/
+
+# Output artifacts
+*.pdf
