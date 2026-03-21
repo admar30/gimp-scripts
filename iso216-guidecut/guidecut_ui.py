@@ -204,6 +204,211 @@ class RoundedField(ttk.Frame):
         self._draw()
 
 
+class RoundedButton(tk.Canvas):
+    def __init__(
+        self,
+        parent: tk.Widget,
+        *,
+        text: str,
+        command=None,
+        variant: str = "secondary",
+        radius: int = 8,
+        height: int = 34,
+        min_width: int = 90,
+        background: str = COLORS["bg.panel"],
+        font=None,
+        takefocus: bool = True,
+    ) -> None:
+        self._text = text
+        self._command = command
+        self._variant = variant
+        self._radius = radius
+        self._height = height
+        self._disabled = False
+        self._hovered = False
+        self._pressed = False
+        self._focused = False
+
+        width = max(min_width, 24 + len(text) * 8)
+        button_font = font or (FONTS["label"] if variant == "primary" else FONTS["body"])
+
+        super().__init__(
+            parent,
+            width=width,
+            height=height,
+            highlightthickness=0,
+            borderwidth=0,
+            bg=background,
+            takefocus=1 if takefocus else 0,
+            cursor="hand2",
+        )
+        self._font = button_font
+
+        self.bind("<Configure>", self._on_configure, add=True)
+        self.bind("<Enter>", self._on_enter, add=True)
+        self.bind("<Leave>", self._on_leave, add=True)
+        self.bind("<ButtonPress-1>", self._on_press, add=True)
+        self.bind("<ButtonRelease-1>", self._on_release, add=True)
+        self.bind("<FocusIn>", self._on_focus_in, add=True)
+        self.bind("<FocusOut>", self._on_focus_out, add=True)
+        self.bind("<KeyPress-Return>", self._on_key_activate, add=True)
+        self.bind("<KeyPress-space>", self._on_key_activate, add=True)
+
+        self._draw()
+
+    @staticmethod
+    def _rounded_points(x1: int, y1: int, x2: int, y2: int, r: int) -> list[int]:
+        return [
+            x1 + r,
+            y1,
+            x1 + r,
+            y1,
+            x2 - r,
+            y1,
+            x2 - r,
+            y1,
+            x2,
+            y1,
+            x2,
+            y1 + r,
+            x2,
+            y1 + r,
+            x2,
+            y2 - r,
+            x2,
+            y2 - r,
+            x2,
+            y2,
+            x2 - r,
+            y2,
+            x2 - r,
+            y2,
+            x1 + r,
+            y2,
+            x1 + r,
+            y2,
+            x1,
+            y2,
+            x1,
+            y2 - r,
+            x1,
+            y2 - r,
+            x1,
+            y1 + r,
+            x1,
+            y1 + r,
+            x1,
+            y1,
+        ]
+
+    def _palette(self) -> tuple[str, str, str]:
+        if self._disabled:
+            if self._variant == "primary":
+                return COLORS["border.default"], COLORS["border.default"], COLORS["text.secondary"]
+            return COLORS["bg.panel"], COLORS["border.default"], COLORS["text.secondary"]
+
+        if self._variant == "primary":
+            fill = COLORS["action.primary.hover"] if (self._hovered or self._pressed) else COLORS["action.primary"]
+            border = COLORS["border.focus"] if self._focused else fill
+            return fill, border, COLORS["text.inverse"]
+
+        if self._hovered or self._pressed:
+            fill = COLORS["action.secondary.hover"]
+            border = COLORS["action.secondary.hover"]
+            text = COLORS["text.inverse"]
+        else:
+            fill = COLORS["bg.panel"]
+            border = COLORS["border.default"]
+            text = COLORS["text.primary"]
+        if self._focused:
+            border = COLORS["border.focus"]
+        return fill, border, text
+
+    def _draw(self) -> None:
+        self.delete("all")
+        width = max(self.winfo_width(), 2 * self._radius + 4)
+        height = max(self.winfo_height(), self._height)
+        fill, border, text_color = self._palette()
+        points = self._rounded_points(1, 1, width - 1, height - 1, self._radius)
+        self.create_polygon(
+            points,
+            smooth=True,
+            fill=fill,
+            outline=border,
+            width=1,
+        )
+        self.create_text(
+            width // 2,
+            height // 2,
+            text=self._text,
+            fill=text_color,
+            font=self._font,
+        )
+
+    def _on_configure(self, _event=None) -> None:
+        self._draw()
+
+    def _on_enter(self, _event=None) -> None:
+        self._hovered = True
+        self._draw()
+
+    def _on_leave(self, _event=None) -> None:
+        self._hovered = False
+        self._pressed = False
+        self._draw()
+
+    def _on_press(self, _event=None) -> None:
+        if self._disabled:
+            return
+        self.focus_set()
+        self._pressed = True
+        self._draw()
+
+    def _on_release(self, event=None) -> None:
+        if self._disabled:
+            return
+        was_pressed = self._pressed
+        self._pressed = False
+        self._draw()
+        if not was_pressed:
+            return
+        if event is None:
+            self.invoke()
+            return
+        inside = 0 <= event.x <= self.winfo_width() and 0 <= event.y <= self.winfo_height()
+        if inside:
+            self.invoke()
+
+    def _on_focus_in(self, _event=None) -> None:
+        self._focused = True
+        self._draw()
+
+    def _on_focus_out(self, _event=None) -> None:
+        self._focused = False
+        self._pressed = False
+        self._draw()
+
+    def _on_key_activate(self, _event=None) -> str | None:
+        if self._disabled:
+            return "break"
+        self.invoke()
+        return "break"
+
+    def state(self, specs: list[str]) -> None:
+        for spec in specs:
+            if spec == "disabled":
+                self._disabled = True
+            elif spec == "!disabled":
+                self._disabled = False
+        self.configure(cursor="arrow" if self._disabled else "hand2")
+        self._draw()
+
+    def invoke(self) -> None:
+        if self._disabled or self._command is None:
+            return
+        self._command()
+
+
 class GuidecutApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
@@ -235,7 +440,6 @@ class GuidecutApp(tk.Tk):
 
         root = ttk.Frame(self, style="App.TFrame", padding=SPACING["md"])
         root.grid(row=0, column=0, sticky="nsew")
-        root.columnconfigure(1, weight=1)
         root.rowconfigure(6, weight=1)
 
         panel = ttk.Frame(root, style="Panel.TFrame", padding=SPACING["md"])
@@ -266,11 +470,30 @@ class GuidecutApp(tk.Tk):
         )
         self.input_field = RoundedField(panel, radius=RADIUS["sm"], fill=COLORS["bg.input"])
         self.input_field.grid(row=1, column=1, sticky="ew", pady=(0, SPACING["sm"]))
-        self.input_entry = ttk.Entry(self.input_field.inner, textvariable=self.input_var, style="Flat.TEntry")
-        self.input_entry.pack(fill="both", expand=True, padx=SPACING["sm"], pady=SPACING["xs"])
-        self.input_entry.configure(font=FONTS["body"])
+        self.input_entry = tk.Entry(
+            self.input_field.inner,
+            textvariable=self.input_var,
+            bg=COLORS["bg.input"],
+            fg=COLORS["text.primary"],
+            insertbackground=COLORS["text.primary"],
+            selectbackground=COLORS["action.secondary"],
+            selectforeground=COLORS["text.inverse"],
+            relief=tk.FLAT,
+            borderwidth=0,
+            highlightthickness=0,
+            font=FONTS["body"],
+        )
+        self.input_entry.pack(fill="x", expand=True, padx=SPACING["sm"], pady=SPACING["xs"])
         self.input_field.bind_focus_widget(self.input_entry)
-        ttk.Button(panel, text="Browse...", style="Secondary.TButton", command=self._browse_input).grid(
+        self.input_browse = RoundedButton(
+            panel,
+            text="Browse...",
+            command=self._browse_input,
+            variant="secondary",
+            radius=RADIUS["sm"],
+            min_width=110,
+        )
+        self.input_browse.grid(
             row=1,
             column=2,
             padx=(SPACING["sm"], 0),
@@ -286,23 +509,45 @@ class GuidecutApp(tk.Tk):
         )
         self.target_field = RoundedField(panel, radius=RADIUS["sm"], fill=COLORS["bg.input"])
         self.target_field.grid(row=2, column=1, sticky="ew", pady=(0, SPACING["sm"]))
-        self.target_combo = ttk.Combobox(
+        self.target_menu_button = tk.Menubutton(
             self.target_field.inner,
             textvariable=self.target_var,
-            values=list(SUPPORTED_FORMATS),
-            state="readonly",
-            style="Flat.TCombobox",
+            bg=COLORS["bg.input"],
+            fg=COLORS["text.primary"],
+            activebackground=COLORS["bg.input"],
+            activeforeground=COLORS["text.primary"],
+            relief=tk.FLAT,
+            borderwidth=0,
+            highlightthickness=0,
+            font=FONTS["body"],
+            anchor="w",
+            padx=SPACING["sm"],
+            pady=SPACING["xs"],
+        )
+        self.target_menu = tk.Menu(
+            self.target_menu_button,
+            tearoff=0,
+            bg=COLORS["bg.input"],
+            fg=COLORS["text.primary"],
+            activebackground=COLORS["action.secondary"],
+            activeforeground=COLORS["text.inverse"],
+            relief=tk.SOLID,
+            borderwidth=1,
             font=FONTS["body"],
         )
-        self.target_combo.pack(fill="both", expand=True, padx=SPACING["sm"], pady=SPACING["xs"])
-        self.target_field.bind_focus_widget(self.target_combo)
+        for fmt in SUPPORTED_FORMATS:
+            self.target_menu.add_radiobutton(label=fmt.upper(), value=fmt, variable=self.target_var)
+        self.target_menu_button.configure(menu=self.target_menu)
+        self.target_menu_button.pack(fill="x", expand=True, padx=SPACING["sm"], pady=SPACING["xs"])
+        self.target_field.bind_focus_widget(self.target_menu_button)
 
-        self.info_button = ttk.Button(
+        self.info_button = RoundedButton(
             panel,
             text="i",
-            width=3,
-            style="Secondary.TButton",
             command=lambda: None,
+            variant="secondary",
+            radius=RADIUS["sm"],
+            min_width=34,
             takefocus=True,
         )
         self.info_button.grid(row=2, column=2, padx=(SPACING["sm"], 0), pady=(0, SPACING["sm"]), sticky="e")
@@ -322,15 +567,28 @@ class GuidecutApp(tk.Tk):
         self.output_row.columnconfigure(0, weight=1)
         self.output_field = RoundedField(self.output_row, radius=RADIUS["sm"], fill=COLORS["bg.input"])
         self.output_field.grid(row=0, column=0, sticky="ew")
-        self.output_entry = ttk.Entry(self.output_field.inner, textvariable=self.output_dir_var, style="Flat.TEntry")
-        self.output_entry.pack(fill="both", expand=True, padx=SPACING["sm"], pady=SPACING["xs"])
-        self.output_entry.configure(font=FONTS["body"])
+        self.output_entry = tk.Entry(
+            self.output_field.inner,
+            textvariable=self.output_dir_var,
+            bg=COLORS["bg.input"],
+            fg=COLORS["text.primary"],
+            insertbackground=COLORS["text.primary"],
+            selectbackground=COLORS["action.secondary"],
+            selectforeground=COLORS["text.inverse"],
+            relief=tk.FLAT,
+            borderwidth=0,
+            highlightthickness=0,
+            font=FONTS["body"],
+        )
+        self.output_entry.pack(fill="x", expand=True, padx=SPACING["sm"], pady=SPACING["xs"])
         self.output_field.bind_focus_widget(self.output_entry)
-        self.output_browse = ttk.Button(
+        self.output_browse = RoundedButton(
             self.output_row,
             text="Browse Output...",
-            style="Secondary.TButton",
             command=self._browse_output,
+            variant="secondary",
+            radius=RADIUS["sm"],
+            min_width=130,
         )
         self.output_browse.grid(row=0, column=1, padx=(SPACING["sm"], 0))
         self.output_row.grid_remove()
@@ -338,14 +596,23 @@ class GuidecutApp(tk.Tk):
         button_row = ttk.Frame(panel, style="Panel.TFrame")
         button_row.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(0, SPACING["sm"]))
         button_row.columnconfigure(0, weight=1)
-        self.open_button = ttk.Button(
+        self.open_button = RoundedButton(
             button_row,
             text="Open Folder",
-            style="Secondary.TButton",
             command=self._open_folder,
+            variant="secondary",
+            radius=RADIUS["sm"],
+            min_width=120,
         )
         self.open_button.grid(row=0, column=1, padx=(SPACING["sm"], 0))
-        self.run_button = ttk.Button(button_row, text="Run", style="Primary.TButton", command=self._run)
+        self.run_button = RoundedButton(
+            button_row,
+            text="Run",
+            command=self._run,
+            variant="primary",
+            radius=RADIUS["sm"],
+            min_width=90,
+        )
         self.run_button.grid(row=0, column=2, padx=(SPACING["sm"], 0))
 
         status_container = ttk.Frame(panel, style="Status.TFrame", padding=1)

@@ -186,6 +186,8 @@ Execution details:
   - `Enter` while focused on `Open Folder` opens resolved folder.
 - Format details tooltip should also be reachable without mouse (focusable info control).
 - Clear focus state for all controls.
+- Action buttons must use rounded corners to match field styling.
+- Rounded buttons should be rendered as single-layer controls (no nested native button border inside a rounded wrapper).
 - Status text must remain readable after multiple runs (append log with separators).
 
 ## 9. Acceptance Criteria (Initial Pass)
