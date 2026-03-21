@@ -15,6 +15,11 @@ from pathlib import Path
 from statistics import median
 from typing import Callable, Sequence
 
+MODULE_ROOT = Path(__file__).resolve().parent.parent
+CLI_DIR = MODULE_ROOT / "cli"
+if str(CLI_DIR) not in sys.path:
+    sys.path.insert(0, str(CLI_DIR))
+
 from iso216_guidecut import compute_grid, compute_guides, detect_orientation, parse_target_format
 
 

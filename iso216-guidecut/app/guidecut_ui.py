@@ -39,9 +39,10 @@ from guidecut_runner import (
 from guidecut_theme import COLORS, FONTS, RADIUS, SPACING, apply_ttk_theme
 
 
-SCRIPT_PATH = Path(__file__).with_name("iso216_guidecut.py")
+MODULE_ROOT = Path(__file__).resolve().parent.parent
+SCRIPT_PATH = MODULE_ROOT / "cli" / "iso216_guidecut.py"
 SCRIPT_CWD = SCRIPT_PATH.parent
-STATE_PATH = SCRIPT_CWD / "guidecut_ui_state.json"
+STATE_PATH = Path(__file__).with_name("guidecut_ui_state.json")
 PREVIEW_PANEL_MIN_WIDTH = 300
 BASE_WINDOW_MIN_WIDTH = 760
 PREVIEW_SPLITTER_WIDTH = 6

@@ -8,6 +8,14 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
+MODULE_ROOT = Path(__file__).resolve().parents[1]
+APP_DIR = MODULE_ROOT / "app"
+CLI_DIR = MODULE_ROOT / "cli"
+for _module_dir in (APP_DIR, CLI_DIR):
+    _path_text = str(_module_dir)
+    if _path_text not in sys.path:
+        sys.path.insert(0, _path_text)
+
 from guidecut_runner import (
     DEFAULT_UI_STATE,
     browse_initial_directory,

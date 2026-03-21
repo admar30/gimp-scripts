@@ -6,9 +6,9 @@
 single multi-page PDF (one tile per page).
 
 ### Specs
-- Tool spec: `iso216-guideline-cutter-tool-spec.md`
-- UI spec: `guidecut-ui-spec.md`
-- UI theme spec: `guidecut-ui-theme-spec.md`
+- Tool spec: `docs/specs/iso216-guideline-cutter-tool-spec.md`
+- UI spec: `docs/specs/guidecut-ui-spec.md`
+- UI theme spec: `docs/specs/guidecut-ui-theme-spec.md`
 
 ### Requirements
 - Python 3
@@ -16,24 +16,30 @@ single multi-page PDF (one tile per page).
 
 ### Usage
 ```powershell
-python iso216-guidecut/iso216_guidecut.py <input_path> <target_format>
+python iso216-guidecut/cli/iso216_guidecut.py <input_path> <target_format>
 ```
 
 Example:
 ```powershell
-python iso216-guidecut/iso216_guidecut.py C:\path\poster.png a1
+python iso216-guidecut/cli/iso216_guidecut.py C:\path\poster.png a1
 ```
 
 Optional explicit output path:
 ```powershell
-python iso216-guidecut/iso216_guidecut.py C:\path\poster.png a1 --output C:\path\poster-cut.pdf
+python iso216-guidecut/cli/iso216_guidecut.py C:\path\poster.png a1 --output C:\path\poster-cut.pdf
 ```
 
 ### UI
 Launch the desktop UI:
 
+From the `gimp-scripts` repo root:
 ```powershell
-python iso216-guidecut/guidecut_ui.py
+python iso216-guidecut/app/guidecut_ui.py
+```
+
+From inside the `iso216-guidecut` folder:
+```powershell
+python app/guidecut_ui.py
 ```
 
 UI interactions in current pass:

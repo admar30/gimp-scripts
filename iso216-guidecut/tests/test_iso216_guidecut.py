@@ -1,9 +1,16 @@
 from __future__ import annotations
 
 import datetime as dt
+import sys
 from pathlib import Path
 
 import pytest
+
+MODULE_ROOT = Path(__file__).resolve().parents[1]
+CLI_DIR = MODULE_ROOT / "cli"
+CLI_PATH = str(CLI_DIR)
+if CLI_PATH not in sys.path:
+    sys.path.insert(0, CLI_PATH)
 
 from iso216_guidecut import (
     build_output_path,
