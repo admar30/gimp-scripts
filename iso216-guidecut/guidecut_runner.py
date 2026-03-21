@@ -6,6 +6,7 @@ Runner helpers for the ISO216 Guidecut UI.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 import threading
@@ -29,6 +30,8 @@ DEFAULT_UI_STATE = {
     "target_format": "a2",
     "specify_output_dir": False,
     "output_dir": "",
+    "input_dir": "",
+    "window_geometry": "",
 }
 
 
@@ -135,6 +138,26 @@ def browse_initial_directory(input_path_value: str) -> str | None:
     return None
 
 
+def persisted_input_directory(input_path_value: str) -> str:
+    input_text = input_path_value.strip()
+    if not input_text:
+        return ""
+    try:
+        return str(resolve_input_folder_from_field(input_text))
+    except ValueError:
+        return ""
+
+
+def sanitize_window_geometry(value: str) -> str:
+    geometry = value.strip()
+    if not geometry:
+        return ""
+    # Accept "WxH+X+Y", "WxH-X+Y", etc. and "WxH" fallback.
+    if re.fullmatch(r"\d+x\d+(?:[+-]\d+[+-]\d+)?", geometry):
+        return geometry
+    return ""
+
+
 def _coerce_bool(value) -> bool:  # noqa: ANN001
     if isinstance(value, bool):
         return value
@@ -163,6 +186,10 @@ def sanitize_ui_state(raw: dict | None) -> dict:
     state["specify_output_dir"] = _coerce_bool(raw.get("specify_output_dir", state["specify_output_dir"]))
     output_dir = raw.get("output_dir", state["output_dir"])
     state["output_dir"] = str(output_dir).strip() if output_dir is not None else ""
+    input_dir = raw.get("input_dir", state["input_dir"])
+    state["input_dir"] = persisted_input_directory(str(input_dir) if input_dir is not None else "")
+    window_geometry = raw.get("window_geometry", state["window_geometry"])
+    state["window_geometry"] = sanitize_window_geometry(str(window_geometry) if window_geometry is not None else "")
     return state
 
 
@@ -186,12 +213,16 @@ def save_ui_state(
     target_format: str,
     specify_output_dir: bool,
     output_dir: str,
+    input_dir: str = "",
+    window_geometry: str = "",
 ) -> None:
     state = sanitize_ui_state(
         {
             "target_format": target_format,
             "specify_output_dir": specify_output_dir,
             "output_dir": output_dir,
+            "input_dir": input_dir,
+            "window_geometry": window_geometry,
         }
     )
     try:

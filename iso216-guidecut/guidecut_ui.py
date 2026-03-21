@@ -424,11 +424,13 @@ class GuidecutApp(tk.Tk):
         self._run_thread: threading.Thread | None = None
         self._last_run_input_path: Path | None = None
         self._startup_warnings: list[str] = []
+        self._pending_window_geometry: str = ""
 
         self._style = apply_ttk_theme(self)
         self._load_persisted_state()
         self._build_ui()
         self._toggle_output_controls()
+        self._apply_persisted_window_geometry()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         for warning in self._startup_warnings:
             self._append_status(f"Warning: {warning}")
@@ -440,7 +442,6 @@ class GuidecutApp(tk.Tk):
 
         root = ttk.Frame(self, style="App.TFrame", padding=SPACING["md"])
         root.grid(row=0, column=0, sticky="nsew")
-        root.rowconfigure(6, weight=1)
 
         panel = ttk.Frame(root, style="Panel.TFrame", padding=SPACING["md"])
         panel.grid(row=0, column=0, sticky="nsew")
@@ -656,6 +657,27 @@ class GuidecutApp(tk.Tk):
         self.target_var.set(state["target_format"].upper())
         self.specify_output_var.set(bool(state["specify_output_dir"]))
         self.output_dir_var.set(state["output_dir"])
+        self.input_var.set(state["input_dir"])
+        self._pending_window_geometry = state["window_geometry"]
+
+    def _apply_persisted_window_geometry(self) -> None:
+        if not self._pending_window_geometry:
+            return
+        try:
+            self.update_idletasks()
+            self.geometry(self._pending_window_geometry)
+        except tk.TclError as exc:
+            self._startup_warnings.append(
+                f"Unable to restore window geometry '{self._pending_window_geometry}': {exc}"
+            )
+            self._pending_window_geometry = ""
+
+    def _current_window_geometry(self) -> str:
+        try:
+            self.update_idletasks()
+            return self.geometry()
+        except tk.TclError:
+            return ""
 
     def _on_close(self) -> None:
         try:
@@ -664,6 +686,8 @@ class GuidecutApp(tk.Tk):
                 target_format=self.target_var.get(),
                 specify_output_dir=self.specify_output_var.get(),
                 output_dir=self.output_dir_var.get(),
+                input_dir=self.input_var.get(),
+                window_geometry=self._current_window_geometry(),
             )
         except RuntimeError as exc:
             self._append_status(f"Warning: {exc}")

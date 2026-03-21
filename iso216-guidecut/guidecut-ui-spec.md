@@ -32,8 +32,8 @@ Initial pass focuses on collecting required script inputs, optional output-direc
 - Show a short usage hint above the input field.
 - Keep instruction text concise and always visible.
 8. Session persistence:
-- On app close, persist selected target format and output settings.
-- On next app launch, restore persisted target format and output settings.
+- On app close, persist selected target format, output settings, input-folder context, and window size/desktop location.
+- On next app launch, restore persisted target format, output settings, input-folder context, and window size/desktop location.
 
 ## 3. Non-Goals (Initial Pass)
 - Batch mode (multiple files).
@@ -165,10 +165,12 @@ Current layout in the implemented UI:
   - `Target Format`
   - `Specify output directory` toggle state
   - `Output Directory` value
+- `Input File` folder context only (filename is removed before persist)
+- Window geometry (`width x height + x + y`) for size and desktop position
 - Restore these values on startup.
-- Do not persist `Input File` path.
+- Do not persist input filename.
 - If persisted data is missing/invalid:
-  - fall back to defaults (`a2`, toggle off, empty output directory).
+  - fall back to defaults (`A2`, toggle off, empty output directory, empty input-folder context, platform default window placement/size).
 
 ## 6. Script Integration Contract
 Base command form:
@@ -226,7 +228,8 @@ Execution details:
 9. `Open Folder` opens source folder by default and explicit output directory when selected.
 10. Hovering format tooltip control shows the selected format's tile count and A4-relative size.
 11. A simple usage instruction block is visible above the input field.
-12. After app restart, target format and output settings are restored from previous session.
+12. After app restart, target format, output settings, and input-folder context are restored from previous session.
+13. After app restart, window size and desktop location are restored from previous session when valid persisted geometry exists.
 
 ## 10. Suggested Implementation Notes
 - Recommended stack for first implementation: Python `tkinter` (no extra dependency).

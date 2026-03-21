@@ -23,6 +23,8 @@ from guidecut_runner import (
     run_command_streaming,
     save_ui_state,
     sanitize_ui_state,
+    persisted_input_directory,
+    sanitize_window_geometry,
     tooltip_text_for_format,
 )
 
@@ -127,6 +129,21 @@ def test_sanitize_ui_state_defaults_on_bad_values() -> None:
     assert state["target_format"] == DEFAULT_UI_STATE["target_format"]
     assert state["specify_output_dir"] is False
     assert state["output_dir"] == ""
+    assert state["input_dir"] == ""
+    assert state["window_geometry"] == ""
+
+
+def test_sanitize_window_geometry_accepts_valid_and_rejects_invalid() -> None:
+    assert sanitize_window_geometry("1280x720+50+60") == "1280x720+50+60"
+    assert sanitize_window_geometry("1024x768-10+20") == "1024x768-10+20"
+    assert sanitize_window_geometry("900x600") == "900x600"
+    assert sanitize_window_geometry("abc") == ""
+    assert sanitize_window_geometry("1200x800+10") == ""
+
+
+def test_persisted_input_directory_strips_filename() -> None:
+    value = persisted_input_directory("C:/maps/arena.avif")
+    assert value == str(Path("C:/maps").resolve())
 
 
 def test_save_and_load_ui_state_round_trip(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -156,11 +173,15 @@ def test_save_and_load_ui_state_round_trip(monkeypatch: pytest.MonkeyPatch) -> N
         target_format="A1",
         specify_output_dir=True,
         output_dir="C:/out",
+        input_dir="C:/maps/arena.avif",
+        window_geometry="1280x720+80+90",
     )
     loaded = load_ui_state(state_path)
     assert loaded["target_format"] == "a1"
     assert loaded["specify_output_dir"] is True
     assert loaded["output_dir"] == "C:/out"
+    assert loaded["input_dir"] == str(Path("C:/maps").resolve())
+    assert loaded["window_geometry"] == "1280x720+80+90"
 
 
 def test_load_ui_state_returns_defaults_when_missing(monkeypatch: pytest.MonkeyPatch) -> None:
