@@ -14,18 +14,25 @@ from pathlib import Path
 from tkinter import filedialog, ttk
 from tkinter.scrolledtext import ScrolledText
 
+from PIL import Image, ImageOps, ImageTk
+
 from guidecut_runner import (
     SUPPORTED_FORMATS,
     browse_initial_directory,
     build_command,
     build_output_pdf_path,
+    choose_guide_style,
+    effective_preview_state,
     load_ui_state,
     normalize_target_format,
     open_folder,
+    preview_guides_for_source,
     retained_input_value_after_run,
+    resolve_existing_input_file,
     resolve_open_folder,
     resolve_output_directory,
     run_command_streaming,
+    sample_line_luminance,
     save_ui_state,
     tooltip_text_for_format,
 )
@@ -35,6 +42,18 @@ from guidecut_theme import COLORS, FONTS, RADIUS, SPACING, apply_ttk_theme
 SCRIPT_PATH = Path(__file__).with_name("iso216_guidecut.py")
 SCRIPT_CWD = SCRIPT_PATH.parent
 STATE_PATH = SCRIPT_CWD / "guidecut_ui_state.json"
+PREVIEW_PANEL_MIN_WIDTH = 300
+BASE_WINDOW_MIN_WIDTH = 760
+PREVIEW_SPLITTER_WIDTH = 6
+PREVIEW_SPLITTER_PAD_X = SPACING["sm"] + SPACING["xs"]
+UI_PANEL_MIN_WIDTH = 460
+DEFAULT_PREVIEW_SPLIT_RATIO = 0.5
+AUTOFIT_WIDTH_TOLERANCE_PX = 2
+PREVIEW_CONTRAST_DEBOUNCE_MS = 140
+GUIDE_DASH_PATTERN = (6, 4)
+GUIDE_STROKE_WIDTH = 1
+GUIDE_HALO_WIDTH = 3
+ENABLE_ADAPTIVE_GUIDE_CONTRAST = True
 
 
 class HoverTooltip:
@@ -413,23 +432,43 @@ class GuidecutApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("ISO216 Guidecut")
-        self.minsize(760, 460)
+        self.minsize(BASE_WINDOW_MIN_WIDTH, 460)
 
         self.input_var = tk.StringVar()
         self.target_var = tk.StringVar(value="A2")
         self.specify_output_var = tk.BooleanVar(value=False)
         self.output_dir_var = tk.StringVar()
+        self.show_preview_var = tk.BooleanVar(value=False)
 
-        self._event_queue: queue.Queue[tuple[str, str]] = queue.Queue()
+        self._event_queue: queue.Queue[tuple[str, object]] = queue.Queue()
         self._run_thread: threading.Thread | None = None
         self._last_run_input_path: Path | None = None
         self._startup_warnings: list[str] = []
         self._pending_window_geometry: str = ""
+        self._preview_panel_visible = False
+        self._preview_source_path: Path | None = None
+        self._preview_source_image: Image.Image | None = None
+        self._preview_tk_image: ImageTk.PhotoImage | None = None
+        self._preview_loading_path: Path | None = None
+        self._preview_load_request_id = 0
+        self._window_expanded_for_preview = False
+        self._locked_left_panel_width = 0
+        self._preview_split_ratio = DEFAULT_PREVIEW_SPLIT_RATIO
+        self._current_preview_expand_width = 0
+        self._preview_autofit_pending = False
+        self._splitter_drag_start_x = 0
+        self._splitter_drag_start_left_width = 0
+        self._preview_contrast_after_id: str | None = None
+        self._cached_guide_style_key: tuple | None = None
+        self._cached_guide_styles: list[tuple[str, str | None]] = []
 
         self._style = apply_ttk_theme(self)
         self._load_persisted_state()
         self._build_ui()
+        self.input_var.trace_add("write", self._on_input_path_changed)
+        self.target_var.trace_add("write", self._on_target_changed)
         self._toggle_output_controls()
+        self._sync_preview_controls()
         self._apply_persisted_window_geometry()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         for warning in self._startup_warnings:
@@ -440,15 +479,31 @@ class GuidecutApp(tk.Tk):
         self.columnconfigure(0, weight=1)
         self.rowconfigure(0, weight=1)
 
-        root = ttk.Frame(self, style="App.TFrame", padding=SPACING["md"])
-        root.grid(row=0, column=0, sticky="nsew")
+        self.root_container = ttk.Frame(self, style="App.TFrame", padding=SPACING["md"])
+        self.root_container.grid(row=0, column=0, sticky="nsew")
+        self.root_container.rowconfigure(0, weight=1)
+        self.root_container.columnconfigure(0, weight=1)
+        self.root_container.columnconfigure(1, weight=0)
+        self.root_container.columnconfigure(2, weight=0)
 
-        panel = ttk.Frame(root, style="Panel.TFrame", padding=SPACING["md"])
+        panel = ttk.Frame(self.root_container, style="Panel.TFrame", padding=SPACING["md"])
         panel.grid(row=0, column=0, sticky="nsew")
         panel.columnconfigure(1, weight=1)
         panel.rowconfigure(6, weight=1)
-        root.rowconfigure(0, weight=1)
-        root.columnconfigure(0, weight=1)
+        self.panel = panel
+
+        self.preview_splitter = tk.Frame(
+            self.root_container,
+            width=PREVIEW_SPLITTER_WIDTH,
+            bg=COLORS["border.default"],
+            cursor="sb_h_double_arrow",
+            highlightthickness=0,
+            borderwidth=0,
+        )
+        self.preview_splitter.bind("<ButtonPress-1>", self._on_splitter_press, add=True)
+        self.preview_splitter.bind("<B1-Motion>", self._on_splitter_drag, add=True)
+        self.preview_splitter.bind("<ButtonRelease-1>", self._on_splitter_release, add=True)
+        self.preview_splitter.grid_remove()
 
         usage_text = (
             "Usage: 1) Choose an input file. 2) Select target format. "
@@ -501,13 +556,22 @@ class GuidecutApp(tk.Tk):
             pady=(0, SPACING["sm"]),
         )
 
+        self.preview_toggle = ttk.Checkbutton(
+            panel,
+            text="Show preview",
+            variable=self.show_preview_var,
+            command=self._on_preview_toggle,
+        )
+        self.preview_toggle.grid(row=3, column=2, sticky="e", pady=(0, SPACING["sm"]))
+        self.preview_toggle.grid_remove()
+
         self.output_toggle = ttk.Checkbutton(
             panel,
             text="Specify output directory",
             variable=self.specify_output_var,
             command=self._toggle_output_controls,
         )
-        self.output_toggle.grid(row=3, column=0, columnspan=3, sticky="w", pady=(0, SPACING["sm"]))
+        self.output_toggle.grid(row=3, column=0, columnspan=2, sticky="w", pady=(0, SPACING["sm"]))
 
         self.output_row = ttk.Frame(panel, style="Panel.TFrame")
         self.output_row.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(0, SPACING["sm"]))
@@ -599,7 +663,6 @@ class GuidecutApp(tk.Tk):
         )
         self.info_button.grid(row=0, column=2, padx=(2, 0), sticky="w")
         self.info_tooltip = HoverTooltip(self.info_button, self._format_tooltip_text)
-        self.target_var.trace_add("write", lambda *_args: self.info_tooltip.refresh())
         self.open_button = RoundedButton(
             button_row,
             text="Open Folder",
@@ -641,11 +704,469 @@ class GuidecutApp(tk.Tk):
         self.status.tag_configure("stdout", foreground=COLORS["text.primary"])
         self.status.tag_configure("stderr", foreground=COLORS["state.error"])
 
+        self.preview_panel = ttk.Frame(
+            self.root_container,
+            style="Panel.TFrame",
+            padding=SPACING["md"],
+        )
+        self.preview_panel.columnconfigure(0, weight=1)
+        self.preview_panel.rowconfigure(1, weight=1)
+
+        ttk.Label(self.preview_panel, text="Cut Preview", style="Form.TLabel").grid(row=0, column=0, sticky="w")
+
+        self.preview_canvas = tk.Canvas(
+            self.preview_panel,
+            bg=COLORS["bg.input"],
+            highlightthickness=0,
+            borderwidth=0,
+        )
+        self.preview_canvas.grid(row=1, column=0, sticky="nsew", pady=(SPACING["sm"], SPACING["xs"]))
+        self.preview_canvas.bind("<Configure>", self._on_preview_canvas_configure, add=True)
+
+        self.preview_status_var = tk.StringVar(value="Preview hidden.")
+        ttk.Label(
+            self.preview_panel,
+            textvariable=self.preview_status_var,
+            style="Help.TLabel",
+            justify=tk.LEFT,
+            wraplength=280,
+        ).grid(row=2, column=0, sticky="w")
+        self.preview_panel.grid_remove()
+
     def _format_tooltip_text(self) -> str:
         try:
             return tooltip_text_for_format(self.target_var.get())
         except ValueError:
             return "Unsupported format."
+
+    @staticmethod
+    def _resample_filter() -> int:
+        if hasattr(Image, "Resampling"):
+            return Image.Resampling.LANCZOS
+        return Image.LANCZOS
+
+    def _set_preview_status(self, message: str) -> None:
+        self.preview_status_var.set(message)
+
+    def _clear_preview_canvas(self) -> None:
+        self.preview_canvas.delete("all")
+        self._preview_tk_image = None
+
+    def _cancel_contrast_refresh(self) -> None:
+        if self._preview_contrast_after_id is None:
+            return
+        try:
+            self.after_cancel(self._preview_contrast_after_id)
+        except tk.TclError:
+            pass
+        self._preview_contrast_after_id = None
+
+    def _invalidate_guide_style_cache(self) -> None:
+        self._cached_guide_style_key = None
+        self._cached_guide_styles = []
+
+    def _schedule_contrast_refresh(self) -> None:
+        if not self._preview_panel_visible or self._preview_source_image is None:
+            return
+        self._cancel_contrast_refresh()
+        self._preview_contrast_after_id = self.after(
+            PREVIEW_CONTRAST_DEBOUNCE_MS,
+            self._render_preview_with_contrast,
+        )
+
+    def _render_preview_with_contrast(self) -> None:
+        self._preview_contrast_after_id = None
+        if not self._preview_panel_visible or self._preview_source_image is None:
+            return
+        self._render_preview(compute_contrast=True)
+
+    def _close_preview_source(self) -> None:
+        self._cancel_contrast_refresh()
+        self._invalidate_guide_style_cache()
+        if self._preview_source_image is not None:
+            try:
+                self._preview_source_image.close()
+            except Exception:  # noqa: BLE001
+                pass
+        self._preview_source_image = None
+        self._preview_source_path = None
+
+    def _update_preview_split_ratio(self) -> None:
+        if not self._preview_panel_visible:
+            return
+        self.update_idletasks()
+        left_width = max(1, self.panel.winfo_width())
+        preview_width = max(0, self.preview_panel.winfo_width())
+        if preview_width <= 0:
+            return
+        ratio = preview_width / left_width
+        self._preview_split_ratio = max(0.2, min(3.0, ratio))
+
+    def _show_preview_panel(self) -> None:
+        if self._preview_panel_visible:
+            return
+        self.update_idletasks()
+        self._locked_left_panel_width = max(UI_PANEL_MIN_WIDTH, self.panel.winfo_width())
+        desired_preview_width = max(PREVIEW_PANEL_MIN_WIDTH, int(self._locked_left_panel_width * self._preview_split_ratio))
+        self._current_preview_expand_width = desired_preview_width + PREVIEW_SPLITTER_WIDTH + PREVIEW_SPLITTER_PAD_X
+        self.root_container.columnconfigure(0, weight=0, minsize=self._locked_left_panel_width)
+        self.root_container.columnconfigure(1, weight=0, minsize=PREVIEW_SPLITTER_WIDTH)
+        self.root_container.columnconfigure(2, weight=1, minsize=desired_preview_width)
+        self.preview_splitter.grid(row=0, column=1, sticky="ns", padx=(SPACING["sm"], SPACING["xs"]))
+        self.preview_panel.grid(row=0, column=2, sticky="nsew")
+        current_w = self.winfo_width()
+        current_h = self.winfo_height()
+        current_x = self.winfo_x()
+        current_y = self.winfo_y()
+        self.update_idletasks()
+        requested_w = self.winfo_reqwidth()
+        if requested_w > current_w:
+            self.geometry(f"{requested_w}x{current_h}+{current_x}+{current_y}")
+            self.update_idletasks()
+        self._current_preview_expand_width = max(0, self.root_container.winfo_width() - self.panel.winfo_width())
+        self._window_expanded_for_preview = True
+        self._preview_panel_visible = True
+        self._preview_autofit_pending = True
+
+    def _hide_preview_panel(self) -> None:
+        if not self._preview_panel_visible:
+            return
+        self._cancel_contrast_refresh()
+        self._update_preview_split_ratio()
+        self.update_idletasks()
+        preview_allocation = max(0, self.root_container.winfo_width() - self.panel.winfo_width())
+        self.preview_splitter.grid_remove()
+        self.preview_panel.grid_remove()
+        self.root_container.columnconfigure(0, weight=1, minsize=0)
+        self.root_container.columnconfigure(1, weight=0, minsize=0)
+        self.root_container.columnconfigure(2, weight=0, minsize=0)
+        self._locked_left_panel_width = 0
+        if self._window_expanded_for_preview and preview_allocation > 0:
+            self.update_idletasks()
+            current_w = self.winfo_width()
+            current_h = self.winfo_height()
+            current_x = self.winfo_x()
+            current_y = self.winfo_y()
+            new_w = max(BASE_WINDOW_MIN_WIDTH, current_w - preview_allocation)
+            self.geometry(f"{new_w}x{current_h}+{current_x}+{current_y}")
+        self._window_expanded_for_preview = False
+        self._current_preview_expand_width = 0
+        self._preview_panel_visible = False
+        self._preview_autofit_pending = False
+        self._invalidate_guide_style_cache()
+        self._clear_preview_canvas()
+
+    def _on_target_changed(self, *_args) -> None:
+        self.info_tooltip.refresh()
+        if self.show_preview_var.get() and self._preview_source_image is not None:
+            self._invalidate_guide_style_cache()
+            self._render_preview(compute_contrast=True)
+
+    def _on_input_path_changed(self, *_args) -> None:
+        self._sync_preview_controls()
+
+    def _on_preview_toggle(self) -> None:
+        self._sync_preview_controls()
+
+    def _sync_preview_controls(self) -> None:
+        toggle_visible, preview_enabled, file_path = effective_preview_state(
+            self.input_var.get(),
+            self.show_preview_var.get(),
+        )
+
+        if toggle_visible:
+            self.preview_toggle.grid()
+        else:
+            self.preview_toggle.grid_remove()
+
+        if self.show_preview_var.get() != preview_enabled:
+            self.show_preview_var.set(preview_enabled)
+
+        if not preview_enabled or file_path is None:
+            # Invalidate any in-flight preview load when preview is unavailable.
+            self._preview_load_request_id += 1
+            self._preview_loading_path = None
+            self._hide_preview_panel()
+            self._set_preview_status("Preview hidden.")
+            return
+
+        self._show_preview_panel()
+        self._ensure_preview_for_file(file_path)
+
+    def _ensure_preview_for_file(self, file_path: Path) -> None:
+        if self._preview_source_path == file_path and self._preview_source_image is not None:
+            self._render_preview(compute_contrast=True)
+            return
+        if self._preview_loading_path == file_path:
+            return
+        self._request_preview_load(file_path)
+
+    def _request_preview_load(self, file_path: Path) -> None:
+        self._preview_load_request_id += 1
+        request_id = self._preview_load_request_id
+        self._preview_loading_path = file_path
+        self._clear_preview_canvas()
+        self._set_preview_status(f"Loading preview: {file_path.name}")
+        thread = threading.Thread(
+            target=self._preview_load_worker,
+            args=(request_id, file_path),
+            daemon=True,
+        )
+        thread.start()
+
+    def _preview_load_worker(self, request_id: int, file_path: Path) -> None:
+        try:
+            with Image.open(file_path) as source:
+                try:
+                    source.seek(0)
+                except EOFError:
+                    pass
+                corrected = ImageOps.exif_transpose(source)
+                corrected.load()
+                preview_image = corrected.convert("RGB")
+        except Exception as exc:  # noqa: BLE001
+            self._event_queue.put(
+                (
+                    "preview_error",
+                    {
+                        "request_id": request_id,
+                        "path": str(file_path),
+                        "error": str(exc),
+                    },
+                )
+            )
+            return
+
+        self._event_queue.put(
+            (
+                "preview_loaded",
+                {
+                    "request_id": request_id,
+                    "path": str(file_path),
+                    "image": preview_image,
+                },
+            )
+        )
+
+    def _handle_preview_loaded(self, payload: dict[str, object]) -> None:
+        request_id = int(payload["request_id"])
+        image = payload["image"]
+        if not isinstance(image, Image.Image):
+            return
+        if request_id != self._preview_load_request_id:
+            image.close()
+            return
+
+        self._preview_loading_path = None
+        loaded_path = Path(str(payload["path"]))
+        current_input = resolve_existing_input_file(self.input_var.get())
+        if not self.show_preview_var.get() or current_input != loaded_path:
+            image.close()
+            return
+
+        self._close_preview_source()
+        self._preview_source_image = image
+        self._preview_source_path = loaded_path
+        self._preview_autofit_pending = True
+        self._invalidate_guide_style_cache()
+        self._render_preview(compute_contrast=True)
+
+    def _handle_preview_error(self, payload: dict[str, object]) -> None:
+        request_id = int(payload["request_id"])
+        if request_id != self._preview_load_request_id:
+            return
+        self._preview_loading_path = None
+        error_text = str(payload["error"])
+        self._clear_preview_canvas()
+        self._set_preview_status(f"Unable to preview file: {error_text}")
+
+    def _on_preview_canvas_configure(self, _event=None) -> None:
+        if self.show_preview_var.get() and self._preview_source_image is not None:
+            self._render_preview(compute_contrast=False)
+            self._schedule_contrast_refresh()
+
+    def _on_splitter_press(self, event: tk.Event) -> None:
+        if not self._preview_panel_visible:
+            return
+        self.update_idletasks()
+        self._splitter_drag_start_x = int(event.x_root)
+        self._splitter_drag_start_left_width = max(1, self.panel.winfo_width())
+
+    def _on_splitter_drag(self, event: tk.Event) -> None:
+        if not self._preview_panel_visible:
+            return
+        self.update_idletasks()
+        delta = int(event.x_root) - self._splitter_drag_start_x
+        requested_left_width = self._splitter_drag_start_left_width + delta
+        total_width = max(1, self.root_container.winfo_width())
+        reserved = PREVIEW_PANEL_MIN_WIDTH + PREVIEW_SPLITTER_WIDTH + PREVIEW_SPLITTER_PAD_X
+        max_left = max(UI_PANEL_MIN_WIDTH, total_width - reserved)
+        clamped_left = max(UI_PANEL_MIN_WIDTH, min(requested_left_width, max_left))
+        self._locked_left_panel_width = clamped_left
+        self.root_container.columnconfigure(0, weight=0, minsize=clamped_left)
+
+    def _on_splitter_release(self, _event: tk.Event) -> None:
+        if not self._preview_panel_visible:
+            return
+        self.update_idletasks()
+        self._locked_left_panel_width = max(UI_PANEL_MIN_WIDTH, self.panel.winfo_width())
+        self._update_preview_split_ratio()
+
+    def _render_preview(self, *, compute_contrast: bool = True) -> None:
+        if not self._preview_panel_visible or self._preview_source_image is None:
+            return
+
+        source_w, source_h = self._preview_source_image.size
+        if source_w <= 0 or source_h <= 0:
+            self._clear_preview_canvas()
+            self._set_preview_status("Unable to preview file: invalid image dimensions.")
+            return
+
+        if self._preview_autofit_pending:
+            canvas_w = self.preview_canvas.winfo_width()
+            canvas_h = self.preview_canvas.winfo_height()
+            if canvas_w <= 4 or canvas_h <= 4:
+                return
+            initial_scale = min(canvas_w / source_w, canvas_h / source_h)
+            initial_display_w = max(1, int(source_w * initial_scale))
+            self._autofit_preview_panel_to_image(initial_display_w, canvas_w)
+            self.update_idletasks()
+
+        canvas_w = self.preview_canvas.winfo_width()
+        canvas_h = self.preview_canvas.winfo_height()
+        if canvas_w <= 4 or canvas_h <= 4:
+            return
+
+        scale = min(canvas_w / source_w, canvas_h / source_h)
+        display_w = max(1, int(source_w * scale))
+        display_h = max(1, int(source_h * scale))
+        offset_x = (canvas_w - display_w) // 2
+        offset_y = (canvas_h - display_h) // 2
+
+        resized = self._preview_source_image.resize((display_w, display_h), self._resample_filter())
+        self._preview_tk_image = ImageTk.PhotoImage(resized)
+        self.preview_canvas.delete("all")
+        self.preview_canvas.create_image(offset_x, offset_y, anchor="nw", image=self._preview_tk_image)
+
+        cols, rows, vertical_guides, horizontal_guides = preview_guides_for_source(
+            source_w,
+            source_h,
+            self.target_var.get(),
+        )
+        ratio_x = display_w / source_w
+        ratio_y = display_h / source_h
+
+        guide_segments: list[tuple[float, float, float, float]] = []
+        sample_segments: list[tuple[int, int, int, int]] = []
+        for guide_x in vertical_guides:
+            x = offset_x + (guide_x * ratio_x)
+            sample_x = int(round(guide_x * ratio_x))
+            sample_x = max(0, min(display_w - 1, sample_x))
+            guide_segments.append((x, offset_y, x, offset_y + display_h))
+            sample_segments.append((sample_x, 0, sample_x, max(0, display_h - 1)))
+        for guide_y in horizontal_guides:
+            y = offset_y + (guide_y * ratio_y)
+            sample_y = int(round(guide_y * ratio_y))
+            sample_y = max(0, min(display_h - 1, sample_y))
+            guide_segments.append((offset_x, y, offset_x + display_w, y))
+            sample_segments.append((0, sample_y, max(0, display_w - 1), sample_y))
+
+        default_style = (COLORS["border.focus"], None)
+        style_key = (
+            str(self._preview_source_path or ""),
+            self.target_var.get(),
+            display_w,
+            display_h,
+            tuple(sample_segments),
+        )
+        guide_styles: list[tuple[str, str | None]] = [default_style] * len(guide_segments)
+        if ENABLE_ADAPTIVE_GUIDE_CONTRAST:
+            use_cache = (
+                not compute_contrast
+                and self._cached_guide_style_key == style_key
+                and len(self._cached_guide_styles) == len(guide_segments)
+            )
+            if use_cache:
+                guide_styles = list(self._cached_guide_styles)
+            elif compute_contrast and guide_segments:
+                computed: list[tuple[str, str | None]] = []
+                for x0, y0, x1, y1 in sample_segments:
+                    sampled = sample_line_luminance(
+                        resized,
+                        x0,
+                        y0,
+                        x1,
+                        y1,
+                    )
+                    computed.append(choose_guide_style(sampled))
+                if computed:
+                    guide_styles = computed
+                    self._cached_guide_style_key = style_key
+                    self._cached_guide_styles = list(computed)
+            elif compute_contrast:
+                self._cached_guide_style_key = style_key
+                self._cached_guide_styles = []
+
+        for index, (x0, y0, x1, y1) in enumerate(guide_segments):
+            stroke_color, halo_color = (
+                guide_styles[index] if index < len(guide_styles) else default_style
+            )
+            if halo_color:
+                self.preview_canvas.create_line(
+                    x0,
+                    y0,
+                    x1,
+                    y1,
+                    fill=halo_color,
+                    width=GUIDE_HALO_WIDTH,
+                    dash=GUIDE_DASH_PATTERN,
+                )
+            self.preview_canvas.create_line(
+                x0,
+                y0,
+                x1,
+                y1,
+                fill=stroke_color,
+                width=GUIDE_STROKE_WIDTH,
+                dash=GUIDE_DASH_PATTERN,
+            )
+
+        self.preview_canvas.create_rectangle(
+            offset_x,
+            offset_y,
+            offset_x + display_w,
+            offset_y + display_h,
+            outline=COLORS["border.default"],
+            width=1,
+        )
+        source_name = self._preview_source_path.name if self._preview_source_path is not None else "Preview"
+        self._set_preview_status(f"{source_name} ({source_w}x{source_h}px) | Grid {cols}x{rows}")
+
+    def _autofit_preview_panel_to_image(self, display_width_px: int, canvas_width_px: int) -> None:
+        if not self._preview_panel_visible:
+            self._preview_autofit_pending = False
+            return
+        self.update_idletasks()
+        panel_width = max(1, self.preview_panel.winfo_width())
+        non_canvas_width = max(0, panel_width - max(1, canvas_width_px))
+        desired_panel_width = max(PREVIEW_PANEL_MIN_WIDTH, display_width_px + non_canvas_width)
+        width_delta = panel_width - desired_panel_width
+        if width_delta <= AUTOFIT_WIDTH_TOLERANCE_PX:
+            self._preview_autofit_pending = False
+            return
+
+        current_w = self.winfo_width()
+        current_h = self.winfo_height()
+        current_x = self.winfo_x()
+        current_y = self.winfo_y()
+        new_w = max(BASE_WINDOW_MIN_WIDTH, current_w - width_delta)
+        self.root_container.columnconfigure(2, weight=1, minsize=desired_panel_width)
+        if new_w != current_w:
+            self.geometry(f"{new_w}x{current_h}+{current_x}+{current_y}")
+            self.update_idletasks()
+        self._current_preview_expand_width = max(0, self.root_container.winfo_width() - self.panel.winfo_width())
+        self._update_preview_split_ratio()
+        self._preview_autofit_pending = False
 
     def _load_persisted_state(self) -> None:
         try:
@@ -659,6 +1180,7 @@ class GuidecutApp(tk.Tk):
         self.output_dir_var.set(state["output_dir"])
         self.input_var.set(state["input_dir"])
         self._pending_window_geometry = state["window_geometry"]
+        self._preview_split_ratio = float(state["preview_split_ratio"])
 
     def _apply_persisted_window_geometry(self) -> None:
         if not self._pending_window_geometry:
@@ -680,6 +1202,16 @@ class GuidecutApp(tk.Tk):
             return ""
 
     def _on_close(self) -> None:
+        self._preview_load_request_id += 1
+        self._update_preview_split_ratio()
+        self._close_preview_source()
+        window_geometry = self._current_window_geometry()
+        if self._preview_panel_visible:
+            self.update_idletasks()
+            preview_allocation = max(0, self.root_container.winfo_width() - self.panel.winfo_width())
+            if preview_allocation > 0:
+                collapsed_width = max(BASE_WINDOW_MIN_WIDTH, self.winfo_width() - preview_allocation)
+                window_geometry = f"{collapsed_width}x{self.winfo_height()}+{self.winfo_x()}+{self.winfo_y()}"
         try:
             save_ui_state(
                 STATE_PATH,
@@ -687,7 +1219,8 @@ class GuidecutApp(tk.Tk):
                 specify_output_dir=self.specify_output_var.get(),
                 output_dir=self.output_dir_var.get(),
                 input_dir=self.input_var.get(),
-                window_geometry=self._current_window_geometry(),
+                window_geometry=window_geometry,
+                preview_split_ratio=self._preview_split_ratio,
             )
         except RuntimeError as exc:
             self._append_status(f"Warning: {exc}")
@@ -811,7 +1344,7 @@ class GuidecutApp(tk.Tk):
         except Exception as exc:  # noqa: BLE001
             self._event_queue.put(("stderr", str(exc)))
             code = 1
-        self._event_queue.put(("done", str(code)))
+        self._event_queue.put(("done", code))
 
     def _open_folder(self) -> None:
         try:
@@ -829,16 +1362,16 @@ class GuidecutApp(tk.Tk):
     def _drain_queue(self) -> None:
         while True:
             try:
-                channel, text = self._event_queue.get_nowait()
+                channel, payload = self._event_queue.get_nowait()
             except queue.Empty:
                 break
 
             if channel == "stdout":
-                self._append_status(text)
+                self._append_status(str(payload))
             elif channel == "stderr":
-                self._append_status(text, error=True)
+                self._append_status(str(payload), error=True)
             elif channel == "done":
-                code = int(text)
+                code = int(payload)
                 if code == 0:
                     self._append_status("Run completed successfully.")
                 else:
@@ -849,6 +1382,12 @@ class GuidecutApp(tk.Tk):
                 else:
                     self.input_var.set("")
                 self.input_entry.focus_set()
+            elif channel == "preview_loaded":
+                if isinstance(payload, dict):
+                    self._handle_preview_loaded(payload)
+            elif channel == "preview_error":
+                if isinstance(payload, dict):
+                    self._handle_preview_error(payload)
 
         self.after(100, self._drain_queue)
 

@@ -6,22 +6,32 @@ import sys
 from pathlib import Path
 
 import pytest
+from PIL import Image
 
 from guidecut_runner import (
     DEFAULT_UI_STATE,
     browse_initial_directory,
     build_command,
     build_output_pdf_path,
+    choose_guide_style,
+    contrast_ratio,
+    GUIDE_CONTRAST_HALO_THRESHOLD,
     load_ui_state,
     normalize_target_format,
     open_folder,
     open_folder_command,
+    effective_preview_state,
+    relative_luminance,
+    preview_guides_for_source,
     resolve_input_folder_from_field,
+    resolve_existing_input_file,
     resolve_open_folder,
     resolve_output_directory,
     retained_input_value_after_run,
     run_command_streaming,
+    sample_line_luminance,
     save_ui_state,
+    sanitize_preview_split_ratio,
     sanitize_ui_state,
     persisted_input_directory,
     sanitize_window_geometry,
@@ -98,6 +108,63 @@ def test_resolve_input_folder_from_field_existing_directory(monkeypatch: pytest.
     assert str(resolved).replace("\\", "/").endswith("/in/maps")
 
 
+def test_resolve_existing_input_file_returns_none_for_empty_or_missing() -> None:
+    assert resolve_existing_input_file("") is None
+    assert resolve_existing_input_file("C:/missing/nope.avif") is None
+
+
+def test_resolve_existing_input_file_returns_path_for_existing_file(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_exists(self: Path) -> bool:
+        return str(self).replace("\\", "/").endswith("/in/maps/arena.avif")
+
+    def fake_is_file(self: Path) -> bool:
+        return fake_exists(self)
+
+    monkeypatch.setattr(Path, "exists", fake_exists, raising=False)
+    monkeypatch.setattr(Path, "is_file", fake_is_file, raising=False)
+
+    resolved = resolve_existing_input_file("C:/in/maps/arena.avif")
+    assert resolved is not None
+    assert str(resolved).replace("\\", "/").endswith("/in/maps/arena.avif")
+
+
+def test_effective_preview_state_for_missing_input() -> None:
+    visible, enabled, file_path = effective_preview_state("C:/missing/nope.avif", True)
+    assert visible is False
+    assert enabled is False
+    assert file_path is None
+
+
+def test_effective_preview_state_for_existing_file(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_exists(self: Path) -> bool:
+        return str(self).replace("\\", "/").endswith("/in/maps/arena.avif")
+
+    def fake_is_file(self: Path) -> bool:
+        return fake_exists(self)
+
+    monkeypatch.setattr(Path, "exists", fake_exists, raising=False)
+    monkeypatch.setattr(Path, "is_file", fake_is_file, raising=False)
+
+    visible, enabled, file_path = effective_preview_state("C:/in/maps/arena.avif", True)
+    assert visible is True
+    assert enabled is True
+    assert file_path is not None
+
+
+def test_preview_guides_for_source_uses_orientation_and_target_grid() -> None:
+    cols, rows, vertical, horizontal = preview_guides_for_source(1000, 500, "A2")
+    assert cols == 2
+    assert rows == 2
+    assert vertical == [500]
+    assert horizontal == [250]
+
+    cols, rows, vertical, horizontal = preview_guides_for_source(500, 1000, "A3")
+    assert cols == 1
+    assert rows == 2
+    assert vertical == []
+    assert horizontal == [500]
+
+
 def test_browse_initial_directory_none_for_empty_or_non_existing() -> None:
     assert browse_initial_directory("") is None
     assert browse_initial_directory("C:/missing/nope.avif") is None
@@ -131,6 +198,7 @@ def test_sanitize_ui_state_defaults_on_bad_values() -> None:
     assert state["output_dir"] == ""
     assert state["input_dir"] == ""
     assert state["window_geometry"] == ""
+    assert state["preview_split_ratio"] == DEFAULT_UI_STATE["preview_split_ratio"]
 
 
 def test_sanitize_window_geometry_accepts_valid_and_rejects_invalid() -> None:
@@ -139,6 +207,68 @@ def test_sanitize_window_geometry_accepts_valid_and_rejects_invalid() -> None:
     assert sanitize_window_geometry("900x600") == "900x600"
     assert sanitize_window_geometry("abc") == ""
     assert sanitize_window_geometry("1200x800+10") == ""
+
+
+def test_sanitize_preview_split_ratio_bounds_and_defaults() -> None:
+    assert sanitize_preview_split_ratio(0.8) == 0.8
+    assert sanitize_preview_split_ratio("1.25") == 1.25
+    assert sanitize_preview_split_ratio(0.1) == DEFAULT_UI_STATE["preview_split_ratio"]
+    assert sanitize_preview_split_ratio("bad") == DEFAULT_UI_STATE["preview_split_ratio"]
+
+
+def test_relative_luminance_monotonicity_black_gray_white() -> None:
+    black = relative_luminance((0, 0, 0))
+    gray = relative_luminance((127, 127, 127))
+    white = relative_luminance((255, 255, 255))
+    assert black < gray < white
+
+
+def test_contrast_ratio_sanity() -> None:
+    black = relative_luminance((0, 0, 0))
+    white = relative_luminance((255, 255, 255))
+    light_gray = relative_luminance((220, 220, 220))
+    assert contrast_ratio(white, black) > contrast_ratio(white, light_gray)
+
+
+def test_choose_guide_style_prefers_light_stroke_for_dark_samples() -> None:
+    stroke, halo = choose_guide_style([0.01, 0.02, 0.03, 0.04])
+    assert stroke == "#FFFFFF"
+    assert halo is None
+
+
+def test_choose_guide_style_prefers_dark_stroke_for_light_samples() -> None:
+    stroke, halo = choose_guide_style([0.93, 0.95, 0.97])
+    assert stroke == "#111111"
+    assert halo is None
+
+
+def test_choose_guide_style_adds_halo_for_low_worst_case_contrast() -> None:
+    samples = [
+        relative_luminance((15, 143, 132)),
+        relative_luminance((255, 255, 255)),
+        relative_luminance((17, 17, 17)),
+        relative_luminance((255, 213, 74)),
+        relative_luminance((255, 77, 109)),
+    ]
+    stroke, halo = choose_guide_style(samples)
+    assert halo is not None
+    assert halo != stroke
+    assert GUIDE_CONTRAST_HALO_THRESHOLD > 1.0
+
+
+def test_sample_line_luminance_and_style_selection_vary_by_background() -> None:
+    image = Image.new("RGB", (80, 20), (255, 255, 255))
+    for x in range(0, 40):
+        for y in range(0, 20):
+            image.putpixel((x, y), (10, 10, 10))
+
+    dark_samples = sample_line_luminance(image, 10, 0, 10, 19, step=4)
+    light_samples = sample_line_luminance(image, 70, 0, 70, 19, step=4)
+    assert dark_samples and light_samples
+
+    dark_style = choose_guide_style(dark_samples)
+    light_style = choose_guide_style(light_samples)
+    assert dark_style[0] != light_style[0]
 
 
 def test_persisted_input_directory_strips_filename() -> None:
@@ -175,6 +305,7 @@ def test_save_and_load_ui_state_round_trip(monkeypatch: pytest.MonkeyPatch) -> N
         output_dir="C:/out",
         input_dir="C:/maps/arena.avif",
         window_geometry="1280x720+80+90",
+        preview_split_ratio=0.75,
     )
     loaded = load_ui_state(state_path)
     assert loaded["target_format"] == "a1"
@@ -182,6 +313,7 @@ def test_save_and_load_ui_state_round_trip(monkeypatch: pytest.MonkeyPatch) -> N
     assert loaded["output_dir"] == "C:/out"
     assert loaded["input_dir"] == str(Path("C:/maps").resolve())
     assert loaded["window_geometry"] == "1280x720+80+90"
+    assert loaded["preview_split_ratio"] == 0.75
 
 
 def test_load_ui_state_returns_defaults_when_missing(monkeypatch: pytest.MonkeyPatch) -> None:
