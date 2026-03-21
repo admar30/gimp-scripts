@@ -4,16 +4,17 @@ Status: Draft v1.0
 Date: 2026-03-21
 
 ## 1. Purpose
-This tool takes an input document/image and a target ISO216 format (`a3`, `a2`, `a1`, or `a0`), creates GIMP guides that represent bisection cut lines, and exports all tiles into a single multi-page PDF intended for A4 printing and physical assembly.
+This tool takes an input document/image and a target ISO216 format (`a3`, `a2`, `a1`, or `a0`), computes guide positions that represent bisection cut lines, and exports all tiles into a single multi-page PDF intended for A4 printing and physical assembly.
 
 The source file may have non-standard internal dimensions. The tool does not reject non-ISO dimensions and does not require a strict A-series aspect ratio.
 
 ## 2. References
-- GIMP image guides: https://docs.gimp.org/2.10/en/gimp-concepts-image-guides.html
-- GIMP guide creation functions:
+- GIMP guide concept reference (optional backend context):
+  - https://docs.gimp.org/2.10/en/gimp-concepts-image-guides.html
+- GIMP guide creation functions (optional backend context):
   - https://docs.gimp.org/2.10/en/script-fu-guide-new.html
   - https://docs.gimp.org/2.10/en/script-fu-guide-new-percent.html
-- GIMP slicing concept (guillotine): https://docs.gimp.org/2.10/en/plug-in-guillotine.html
+- GIMP slicing concept (optional backend context): https://docs.gimp.org/2.10/en/plug-in-guillotine.html
 - ISO216 paper sizes: https://ms-kb.msd.unimelb.edu.au/print-room/file-preperation/understanding-paper-size
 
 ## 3. CLI Contract
@@ -26,12 +27,17 @@ The source file may have non-standard internal dimensions. The tool does not rej
 - Case-insensitive input is allowed (`A2` accepted, normalized to `a2`)
 - Any other value must fail with a clear error message and non-zero exit code
 
+### 3.3 Backend Requirement
+- GIMP is not required.
+- Default implementation backend is Pillow/Python.
+- Optional future backends (including GIMP batch mode) must preserve the same CLI contract and output behavior.
+
 ## 4. Functional Requirements
 ### 4.1 High-Level Flow
-1. Load source file into GIMP.
+1. Load source file via the selected image backend (default: Pillow).
 2. Detect orientation from source dimensions.
 3. Compute bisection grid from `target_format` and orientation.
-4. Add vertical/horizontal guides at computed cut lines.
+4. Compute vertical/horizontal guide positions at cut lines.
 5. Generate tile crop rectangles from the guide grid.
 6. Export all tiles into one multi-page PDF with deterministic page ordering.
 
@@ -97,7 +103,7 @@ Example for `a2` (2x2) page sequence:
 
 ### 4.5 Export Requirements
 - Export one multi-page PDF containing every tile as one page.
-- Preserve color profile and metadata in export when GIMP/PDF path supports it.
+- Preserve color profile and metadata in export when the active backend/PDF path supports it.
 - If full metadata preservation is not possible for a given input/export path, emit a warning but continue.
 
 ## 5. Validation and Error Handling
