@@ -21,6 +21,7 @@ from guidecut_runner import (
     browse_initial_directory,
     build_command,
     build_output_pdf_path,
+    choose_guide_style,
     effective_preview_state,
     load_ui_state,
     normalize_target_format,
@@ -31,6 +32,7 @@ from guidecut_runner import (
     resolve_open_folder,
     resolve_output_directory,
     run_command_streaming,
+    sample_line_luminance,
     save_ui_state,
     tooltip_text_for_format,
 )
@@ -47,6 +49,11 @@ PREVIEW_SPLITTER_PAD_X = SPACING["sm"] + SPACING["xs"]
 UI_PANEL_MIN_WIDTH = 460
 DEFAULT_PREVIEW_SPLIT_RATIO = 0.5
 AUTOFIT_WIDTH_TOLERANCE_PX = 2
+PREVIEW_CONTRAST_DEBOUNCE_MS = 140
+GUIDE_DASH_PATTERN = (6, 4)
+GUIDE_STROKE_WIDTH = 1
+GUIDE_HALO_WIDTH = 3
+ENABLE_ADAPTIVE_GUIDE_CONTRAST = True
 
 
 class HoverTooltip:
@@ -451,6 +458,9 @@ class GuidecutApp(tk.Tk):
         self._preview_autofit_pending = False
         self._splitter_drag_start_x = 0
         self._splitter_drag_start_left_width = 0
+        self._preview_contrast_after_id: str | None = None
+        self._cached_guide_style_key: tuple | None = None
+        self._cached_guide_styles: list[tuple[str, str | None]] = []
 
         self._style = apply_ttk_theme(self)
         self._load_persisted_state()
@@ -742,7 +752,37 @@ class GuidecutApp(tk.Tk):
         self.preview_canvas.delete("all")
         self._preview_tk_image = None
 
+    def _cancel_contrast_refresh(self) -> None:
+        if self._preview_contrast_after_id is None:
+            return
+        try:
+            self.after_cancel(self._preview_contrast_after_id)
+        except tk.TclError:
+            pass
+        self._preview_contrast_after_id = None
+
+    def _invalidate_guide_style_cache(self) -> None:
+        self._cached_guide_style_key = None
+        self._cached_guide_styles = []
+
+    def _schedule_contrast_refresh(self) -> None:
+        if not self._preview_panel_visible or self._preview_source_image is None:
+            return
+        self._cancel_contrast_refresh()
+        self._preview_contrast_after_id = self.after(
+            PREVIEW_CONTRAST_DEBOUNCE_MS,
+            self._render_preview_with_contrast,
+        )
+
+    def _render_preview_with_contrast(self) -> None:
+        self._preview_contrast_after_id = None
+        if not self._preview_panel_visible or self._preview_source_image is None:
+            return
+        self._render_preview(compute_contrast=True)
+
     def _close_preview_source(self) -> None:
+        self._cancel_contrast_refresh()
+        self._invalidate_guide_style_cache()
         if self._preview_source_image is not None:
             try:
                 self._preview_source_image.close()
@@ -791,6 +831,7 @@ class GuidecutApp(tk.Tk):
     def _hide_preview_panel(self) -> None:
         if not self._preview_panel_visible:
             return
+        self._cancel_contrast_refresh()
         self._update_preview_split_ratio()
         self.update_idletasks()
         preview_allocation = max(0, self.root_container.winfo_width() - self.panel.winfo_width())
@@ -812,12 +853,14 @@ class GuidecutApp(tk.Tk):
         self._current_preview_expand_width = 0
         self._preview_panel_visible = False
         self._preview_autofit_pending = False
+        self._invalidate_guide_style_cache()
         self._clear_preview_canvas()
 
     def _on_target_changed(self, *_args) -> None:
         self.info_tooltip.refresh()
         if self.show_preview_var.get() and self._preview_source_image is not None:
-            self._render_preview()
+            self._invalidate_guide_style_cache()
+            self._render_preview(compute_contrast=True)
 
     def _on_input_path_changed(self, *_args) -> None:
         self._sync_preview_controls()
@@ -852,7 +895,7 @@ class GuidecutApp(tk.Tk):
 
     def _ensure_preview_for_file(self, file_path: Path) -> None:
         if self._preview_source_path == file_path and self._preview_source_image is not None:
-            self._render_preview()
+            self._render_preview(compute_contrast=True)
             return
         if self._preview_loading_path == file_path:
             return
@@ -925,7 +968,8 @@ class GuidecutApp(tk.Tk):
         self._preview_source_image = image
         self._preview_source_path = loaded_path
         self._preview_autofit_pending = True
-        self._render_preview()
+        self._invalidate_guide_style_cache()
+        self._render_preview(compute_contrast=True)
 
     def _handle_preview_error(self, payload: dict[str, object]) -> None:
         request_id = int(payload["request_id"])
@@ -938,7 +982,8 @@ class GuidecutApp(tk.Tk):
 
     def _on_preview_canvas_configure(self, _event=None) -> None:
         if self.show_preview_var.get() and self._preview_source_image is not None:
-            self._render_preview()
+            self._render_preview(compute_contrast=False)
+            self._schedule_contrast_refresh()
 
     def _on_splitter_press(self, event: tk.Event) -> None:
         if not self._preview_panel_visible:
@@ -967,7 +1012,7 @@ class GuidecutApp(tk.Tk):
         self._locked_left_panel_width = max(UI_PANEL_MIN_WIDTH, self.panel.winfo_width())
         self._update_preview_split_ratio()
 
-    def _render_preview(self) -> None:
+    def _render_preview(self, *, compute_contrast: bool = True) -> None:
         if not self._preview_panel_visible or self._preview_source_image is None:
             return
 
@@ -1010,27 +1055,80 @@ class GuidecutApp(tk.Tk):
         )
         ratio_x = display_w / source_w
         ratio_y = display_h / source_h
+
+        guide_segments: list[tuple[float, float, float, float]] = []
+        sample_segments: list[tuple[int, int, int, int]] = []
         for guide_x in vertical_guides:
             x = offset_x + (guide_x * ratio_x)
-            self.preview_canvas.create_line(
-                x,
-                offset_y,
-                x,
-                offset_y + display_h,
-                fill=COLORS["border.focus"],
-                width=1,
-                dash=(6, 4),
-            )
+            sample_x = int(round(guide_x * ratio_x))
+            sample_x = max(0, min(display_w - 1, sample_x))
+            guide_segments.append((x, offset_y, x, offset_y + display_h))
+            sample_segments.append((sample_x, 0, sample_x, max(0, display_h - 1)))
         for guide_y in horizontal_guides:
             y = offset_y + (guide_y * ratio_y)
+            sample_y = int(round(guide_y * ratio_y))
+            sample_y = max(0, min(display_h - 1, sample_y))
+            guide_segments.append((offset_x, y, offset_x + display_w, y))
+            sample_segments.append((0, sample_y, max(0, display_w - 1), sample_y))
+
+        default_style = (COLORS["border.focus"], None)
+        style_key = (
+            str(self._preview_source_path or ""),
+            self.target_var.get(),
+            display_w,
+            display_h,
+            tuple(sample_segments),
+        )
+        guide_styles: list[tuple[str, str | None]] = [default_style] * len(guide_segments)
+        if ENABLE_ADAPTIVE_GUIDE_CONTRAST:
+            use_cache = (
+                not compute_contrast
+                and self._cached_guide_style_key == style_key
+                and len(self._cached_guide_styles) == len(guide_segments)
+            )
+            if use_cache:
+                guide_styles = list(self._cached_guide_styles)
+            elif compute_contrast and guide_segments:
+                computed: list[tuple[str, str | None]] = []
+                for x0, y0, x1, y1 in sample_segments:
+                    sampled = sample_line_luminance(
+                        resized,
+                        x0,
+                        y0,
+                        x1,
+                        y1,
+                    )
+                    computed.append(choose_guide_style(sampled))
+                if computed:
+                    guide_styles = computed
+                    self._cached_guide_style_key = style_key
+                    self._cached_guide_styles = list(computed)
+            elif compute_contrast:
+                self._cached_guide_style_key = style_key
+                self._cached_guide_styles = []
+
+        for index, (x0, y0, x1, y1) in enumerate(guide_segments):
+            stroke_color, halo_color = (
+                guide_styles[index] if index < len(guide_styles) else default_style
+            )
+            if halo_color:
+                self.preview_canvas.create_line(
+                    x0,
+                    y0,
+                    x1,
+                    y1,
+                    fill=halo_color,
+                    width=GUIDE_HALO_WIDTH,
+                    dash=GUIDE_DASH_PATTERN,
+                )
             self.preview_canvas.create_line(
-                offset_x,
-                y,
-                offset_x + display_w,
-                y,
-                fill=COLORS["border.focus"],
-                width=1,
-                dash=(6, 4),
+                x0,
+                y0,
+                x1,
+                y1,
+                fill=stroke_color,
+                width=GUIDE_STROKE_WIDTH,
+                dash=GUIDE_DASH_PATTERN,
             )
 
         self.preview_canvas.create_rectangle(

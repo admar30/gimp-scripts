@@ -12,6 +12,7 @@ import sys
 import threading
 from datetime import datetime
 from pathlib import Path
+from statistics import median
 from typing import Callable, Sequence
 
 from iso216_guidecut import compute_grid, compute_guides, detect_orientation, parse_target_format
@@ -34,6 +35,152 @@ DEFAULT_UI_STATE = {
     "window_geometry": "",
     "preview_split_ratio": 0.5,
 }
+
+GUIDE_PRIMARY_CANDIDATES = (
+    "#0F8F84",
+    "#FFFFFF",
+    "#111111",
+    "#FFD54A",
+    "#FF4D6D",
+)
+GUIDE_HALO_CANDIDATES = ("#111111", "#FFFFFF")
+GUIDE_CONTRAST_HALO_THRESHOLD = 2.5
+
+
+def _hex_to_rgb(color: str) -> tuple[int, int, int]:
+    text = color.strip()
+    if not re.fullmatch(r"#[0-9A-Fa-f]{6}", text):
+        raise ValueError(f"Invalid color value: {color}")
+    return int(text[1:3], 16), int(text[3:5], 16), int(text[5:7], 16)
+
+
+def relative_luminance(rgb: tuple[int, int, int]) -> float:
+    def _channel_linear(value: int) -> float:
+        normalized = max(0.0, min(255.0, float(value))) / 255.0
+        if normalized <= 0.04045:
+            return normalized / 12.92
+        return ((normalized + 0.055) / 1.055) ** 2.4
+
+    r_lin = _channel_linear(rgb[0])
+    g_lin = _channel_linear(rgb[1])
+    b_lin = _channel_linear(rgb[2])
+    return (0.2126 * r_lin) + (0.7152 * g_lin) + (0.0722 * b_lin)
+
+
+def contrast_ratio(l1: float, l2: float) -> float:
+    a = max(0.0, min(1.0, float(l1)))
+    b = max(0.0, min(1.0, float(l2)))
+    light, dark = (a, b) if a >= b else (b, a)
+    return (light + 0.05) / (dark + 0.05)
+
+
+def sample_line_luminance(
+    image,  # noqa: ANN001
+    x0: int,
+    y0: int,
+    x1: int,
+    y1: int,
+    *,
+    step: int = 16,
+    neighborhood_radius: int = 1,
+    max_points: int = 128,
+) -> list[float]:
+    if image is None or not hasattr(image, "size"):
+        return []
+
+    width, height = image.size
+    if width <= 0 or height <= 0:
+        return []
+
+    if image.mode != "RGB":
+        rgb_image = image.convert("RGB")
+    else:
+        rgb_image = image
+
+    pixels = rgb_image.load()
+    if pixels is None:
+        return []
+
+    x0 = max(0, min(width - 1, int(x0)))
+    x1 = max(0, min(width - 1, int(x1)))
+    y0 = max(0, min(height - 1, int(y0)))
+    y1 = max(0, min(height - 1, int(y1)))
+
+    radius = max(0, int(neighborhood_radius))
+    step_px = max(1, int(step))
+    max_samples = max(1, int(max_points))
+
+    dx = x1 - x0
+    dy = y1 - y0
+    line_len = max(abs(dx), abs(dy))
+    if line_len == 0:
+        sample_count = 1
+    else:
+        sample_count = max(2, (line_len // step_px) + 1)
+        sample_count = min(sample_count, max_samples)
+
+    samples: list[float] = []
+    for index in range(sample_count):
+        t = 0.0 if sample_count == 1 else index / (sample_count - 1)
+        sample_x = int(round(x0 + (dx * t)))
+        sample_y = int(round(y0 + (dy * t)))
+
+        nx0 = max(0, sample_x - radius)
+        nx1 = min(width - 1, sample_x + radius)
+        ny0 = max(0, sample_y - radius)
+        ny1 = min(height - 1, sample_y + radius)
+
+        local_luminance: list[float] = []
+        for ny in range(ny0, ny1 + 1):
+            for nx in range(nx0, nx1 + 1):
+                pixel = pixels[nx, ny]
+                if isinstance(pixel, int):
+                    rgb = (pixel, pixel, pixel)
+                else:
+                    rgb = tuple(pixel[:3])
+                local_luminance.append(relative_luminance(rgb))
+
+        if local_luminance:
+            samples.append(float(median(local_luminance)))
+
+    return samples
+
+
+def choose_guide_style(samples: Sequence[float]) -> tuple[str, str | None]:
+    default = (GUIDE_PRIMARY_CANDIDATES[0], None)
+    if not samples:
+        return default
+
+    normalized_samples: list[float] = []
+    for value in samples:
+        try:
+            normalized_samples.append(max(0.0, min(1.0, float(value))))
+        except (TypeError, ValueError):
+            continue
+    if not normalized_samples:
+        return default
+
+    best_color = GUIDE_PRIMARY_CANDIDATES[0]
+    best_score = -1.0
+    for candidate in GUIDE_PRIMARY_CANDIDATES:
+        candidate_luminance = relative_luminance(_hex_to_rgb(candidate))
+        worst_contrast = min(contrast_ratio(candidate_luminance, sample) for sample in normalized_samples)
+        if worst_contrast > best_score:
+            best_score = worst_contrast
+            best_color = candidate
+
+    halo_color: str | None = None
+    if best_score < GUIDE_CONTRAST_HALO_THRESHOLD:
+        halo_best_score = -1.0
+        for candidate in GUIDE_HALO_CANDIDATES:
+            if candidate.lower() == best_color.lower():
+                continue
+            candidate_luminance = relative_luminance(_hex_to_rgb(candidate))
+            worst_contrast = min(contrast_ratio(candidate_luminance, sample) for sample in normalized_samples)
+            if worst_contrast > halo_best_score:
+                halo_best_score = worst_contrast
+                halo_color = candidate
+    return best_color, halo_color
 
 
 def normalize_target_format(value: str) -> str:
