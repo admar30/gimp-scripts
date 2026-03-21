@@ -32,6 +32,7 @@ DEFAULT_UI_STATE = {
     "output_dir": "",
     "input_dir": "",
     "window_geometry": "",
+    "preview_split_ratio": 0.5,
 }
 
 
@@ -189,6 +190,16 @@ def sanitize_window_geometry(value: str) -> str:
     return ""
 
 
+def sanitize_preview_split_ratio(value) -> float:  # noqa: ANN001
+    try:
+        ratio = float(value)
+    except (TypeError, ValueError):
+        return float(DEFAULT_UI_STATE["preview_split_ratio"])
+    if not (0.2 <= ratio <= 3.0):
+        return float(DEFAULT_UI_STATE["preview_split_ratio"])
+    return ratio
+
+
 def _coerce_bool(value) -> bool:  # noqa: ANN001
     if isinstance(value, bool):
         return value
@@ -221,6 +232,7 @@ def sanitize_ui_state(raw: dict | None) -> dict:
     state["input_dir"] = persisted_input_directory(str(input_dir) if input_dir is not None else "")
     window_geometry = raw.get("window_geometry", state["window_geometry"])
     state["window_geometry"] = sanitize_window_geometry(str(window_geometry) if window_geometry is not None else "")
+    state["preview_split_ratio"] = sanitize_preview_split_ratio(raw.get("preview_split_ratio"))
     return state
 
 
@@ -246,6 +258,7 @@ def save_ui_state(
     output_dir: str,
     input_dir: str = "",
     window_geometry: str = "",
+    preview_split_ratio: float | int = 0.5,
 ) -> None:
     state = sanitize_ui_state(
         {
@@ -254,6 +267,7 @@ def save_ui_state(
             "output_dir": output_dir,
             "input_dir": input_dir,
             "window_geometry": window_geometry,
+            "preview_split_ratio": preview_split_ratio,
         }
     )
     try:

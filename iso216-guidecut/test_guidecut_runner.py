@@ -25,6 +25,7 @@ from guidecut_runner import (
     retained_input_value_after_run,
     run_command_streaming,
     save_ui_state,
+    sanitize_preview_split_ratio,
     sanitize_ui_state,
     persisted_input_directory,
     sanitize_window_geometry,
@@ -191,6 +192,7 @@ def test_sanitize_ui_state_defaults_on_bad_values() -> None:
     assert state["output_dir"] == ""
     assert state["input_dir"] == ""
     assert state["window_geometry"] == ""
+    assert state["preview_split_ratio"] == DEFAULT_UI_STATE["preview_split_ratio"]
 
 
 def test_sanitize_window_geometry_accepts_valid_and_rejects_invalid() -> None:
@@ -199,6 +201,13 @@ def test_sanitize_window_geometry_accepts_valid_and_rejects_invalid() -> None:
     assert sanitize_window_geometry("900x600") == "900x600"
     assert sanitize_window_geometry("abc") == ""
     assert sanitize_window_geometry("1200x800+10") == ""
+
+
+def test_sanitize_preview_split_ratio_bounds_and_defaults() -> None:
+    assert sanitize_preview_split_ratio(0.8) == 0.8
+    assert sanitize_preview_split_ratio("1.25") == 1.25
+    assert sanitize_preview_split_ratio(0.1) == DEFAULT_UI_STATE["preview_split_ratio"]
+    assert sanitize_preview_split_ratio("bad") == DEFAULT_UI_STATE["preview_split_ratio"]
 
 
 def test_persisted_input_directory_strips_filename() -> None:
@@ -235,6 +244,7 @@ def test_save_and_load_ui_state_round_trip(monkeypatch: pytest.MonkeyPatch) -> N
         output_dir="C:/out",
         input_dir="C:/maps/arena.avif",
         window_geometry="1280x720+80+90",
+        preview_split_ratio=0.75,
     )
     loaded = load_ui_state(state_path)
     assert loaded["target_format"] == "a1"
@@ -242,6 +252,7 @@ def test_save_and_load_ui_state_round_trip(monkeypatch: pytest.MonkeyPatch) -> N
     assert loaded["output_dir"] == "C:/out"
     assert loaded["input_dir"] == str(Path("C:/maps").resolve())
     assert loaded["window_geometry"] == "1280x720+80+90"
+    assert loaded["preview_split_ratio"] == 0.75
 
 
 def test_load_ui_state_returns_defaults_when_missing(monkeypatch: pytest.MonkeyPatch) -> None:

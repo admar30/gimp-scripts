@@ -40,6 +40,13 @@ from guidecut_theme import COLORS, FONTS, RADIUS, SPACING, apply_ttk_theme
 SCRIPT_PATH = Path(__file__).with_name("iso216_guidecut.py")
 SCRIPT_CWD = SCRIPT_PATH.parent
 STATE_PATH = SCRIPT_CWD / "guidecut_ui_state.json"
+PREVIEW_PANEL_MIN_WIDTH = 300
+BASE_WINDOW_MIN_WIDTH = 760
+PREVIEW_SPLITTER_WIDTH = 6
+PREVIEW_SPLITTER_PAD_X = SPACING["sm"] + SPACING["xs"]
+UI_PANEL_MIN_WIDTH = 460
+DEFAULT_PREVIEW_SPLIT_RATIO = 0.5
+AUTOFIT_WIDTH_TOLERANCE_PX = 2
 
 
 class HoverTooltip:
@@ -418,7 +425,7 @@ class GuidecutApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("ISO216 Guidecut")
-        self.minsize(760, 460)
+        self.minsize(BASE_WINDOW_MIN_WIDTH, 460)
 
         self.input_var = tk.StringVar()
         self.target_var = tk.StringVar(value="A2")
@@ -437,6 +444,13 @@ class GuidecutApp(tk.Tk):
         self._preview_tk_image: ImageTk.PhotoImage | None = None
         self._preview_loading_path: Path | None = None
         self._preview_load_request_id = 0
+        self._window_expanded_for_preview = False
+        self._locked_left_panel_width = 0
+        self._preview_split_ratio = DEFAULT_PREVIEW_SPLIT_RATIO
+        self._current_preview_expand_width = 0
+        self._preview_autofit_pending = False
+        self._splitter_drag_start_x = 0
+        self._splitter_drag_start_left_width = 0
 
         self._style = apply_ttk_theme(self)
         self._load_persisted_state()
@@ -458,14 +472,28 @@ class GuidecutApp(tk.Tk):
         self.root_container = ttk.Frame(self, style="App.TFrame", padding=SPACING["md"])
         self.root_container.grid(row=0, column=0, sticky="nsew")
         self.root_container.rowconfigure(0, weight=1)
-        self.root_container.columnconfigure(0, weight=3)
+        self.root_container.columnconfigure(0, weight=1)
         self.root_container.columnconfigure(1, weight=0)
+        self.root_container.columnconfigure(2, weight=0)
 
         panel = ttk.Frame(self.root_container, style="Panel.TFrame", padding=SPACING["md"])
         panel.grid(row=0, column=0, sticky="nsew")
         panel.columnconfigure(1, weight=1)
         panel.rowconfigure(6, weight=1)
         self.panel = panel
+
+        self.preview_splitter = tk.Frame(
+            self.root_container,
+            width=PREVIEW_SPLITTER_WIDTH,
+            bg=COLORS["border.default"],
+            cursor="sb_h_double_arrow",
+            highlightthickness=0,
+            borderwidth=0,
+        )
+        self.preview_splitter.bind("<ButtonPress-1>", self._on_splitter_press, add=True)
+        self.preview_splitter.bind("<B1-Motion>", self._on_splitter_drag, add=True)
+        self.preview_splitter.bind("<ButtonRelease-1>", self._on_splitter_release, add=True)
+        self.preview_splitter.grid_remove()
 
         usage_text = (
             "Usage: 1) Choose an input file. 2) Select target format. "
@@ -524,7 +552,7 @@ class GuidecutApp(tk.Tk):
             variable=self.show_preview_var,
             command=self._on_preview_toggle,
         )
-        self.preview_toggle.grid(row=2, column=2, sticky="e", pady=(0, SPACING["sm"]))
+        self.preview_toggle.grid(row=3, column=2, sticky="e", pady=(0, SPACING["sm"]))
         self.preview_toggle.grid_remove()
 
         self.output_toggle = ttk.Checkbutton(
@@ -533,7 +561,7 @@ class GuidecutApp(tk.Tk):
             variable=self.specify_output_var,
             command=self._toggle_output_controls,
         )
-        self.output_toggle.grid(row=3, column=0, columnspan=3, sticky="w", pady=(0, SPACING["sm"]))
+        self.output_toggle.grid(row=3, column=0, columnspan=2, sticky="w", pady=(0, SPACING["sm"]))
 
         self.output_row = ttk.Frame(panel, style="Panel.TFrame")
         self.output_row.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(0, SPACING["sm"]))
@@ -666,7 +694,11 @@ class GuidecutApp(tk.Tk):
         self.status.tag_configure("stdout", foreground=COLORS["text.primary"])
         self.status.tag_configure("stderr", foreground=COLORS["state.error"])
 
-        self.preview_panel = ttk.Frame(self.root_container, style="Panel.TFrame", padding=SPACING["md"])
+        self.preview_panel = ttk.Frame(
+            self.root_container,
+            style="Panel.TFrame",
+            padding=SPACING["md"],
+        )
         self.preview_panel.columnconfigure(0, weight=1)
         self.preview_panel.rowconfigure(1, weight=1)
 
@@ -719,19 +751,67 @@ class GuidecutApp(tk.Tk):
         self._preview_source_image = None
         self._preview_source_path = None
 
+    def _update_preview_split_ratio(self) -> None:
+        if not self._preview_panel_visible:
+            return
+        self.update_idletasks()
+        left_width = max(1, self.panel.winfo_width())
+        preview_width = max(0, self.preview_panel.winfo_width())
+        if preview_width <= 0:
+            return
+        ratio = preview_width / left_width
+        self._preview_split_ratio = max(0.2, min(3.0, ratio))
+
     def _show_preview_panel(self) -> None:
         if self._preview_panel_visible:
             return
-        self.root_container.columnconfigure(1, weight=2, minsize=280)
-        self.preview_panel.grid(row=0, column=1, sticky="nsew", padx=(SPACING["sm"], 0))
+        self.update_idletasks()
+        self._locked_left_panel_width = max(UI_PANEL_MIN_WIDTH, self.panel.winfo_width())
+        desired_preview_width = max(PREVIEW_PANEL_MIN_WIDTH, int(self._locked_left_panel_width * self._preview_split_ratio))
+        self._current_preview_expand_width = desired_preview_width + PREVIEW_SPLITTER_WIDTH + PREVIEW_SPLITTER_PAD_X
+        self.root_container.columnconfigure(0, weight=0, minsize=self._locked_left_panel_width)
+        self.root_container.columnconfigure(1, weight=0, minsize=PREVIEW_SPLITTER_WIDTH)
+        self.root_container.columnconfigure(2, weight=1, minsize=desired_preview_width)
+        self.preview_splitter.grid(row=0, column=1, sticky="ns", padx=(SPACING["sm"], SPACING["xs"]))
+        self.preview_panel.grid(row=0, column=2, sticky="nsew")
+        current_w = self.winfo_width()
+        current_h = self.winfo_height()
+        current_x = self.winfo_x()
+        current_y = self.winfo_y()
+        self.update_idletasks()
+        requested_w = self.winfo_reqwidth()
+        if requested_w > current_w:
+            self.geometry(f"{requested_w}x{current_h}+{current_x}+{current_y}")
+            self.update_idletasks()
+        self._current_preview_expand_width = max(0, self.root_container.winfo_width() - self.panel.winfo_width())
+        self._window_expanded_for_preview = True
         self._preview_panel_visible = True
+        self._preview_autofit_pending = True
 
     def _hide_preview_panel(self) -> None:
         if not self._preview_panel_visible:
             return
+        self._update_preview_split_ratio()
+        self.update_idletasks()
+        preview_allocation = max(0, self.root_container.winfo_width() - self.panel.winfo_width())
+        self.preview_splitter.grid_remove()
         self.preview_panel.grid_remove()
+        self.root_container.columnconfigure(0, weight=1, minsize=0)
         self.root_container.columnconfigure(1, weight=0, minsize=0)
+        self.root_container.columnconfigure(2, weight=0, minsize=0)
+        self._locked_left_panel_width = 0
+        if self._window_expanded_for_preview and preview_allocation > 0:
+            self.update_idletasks()
+            current_w = self.winfo_width()
+            current_h = self.winfo_height()
+            current_x = self.winfo_x()
+            current_y = self.winfo_y()
+            new_w = max(BASE_WINDOW_MIN_WIDTH, current_w - preview_allocation)
+            self.geometry(f"{new_w}x{current_h}+{current_x}+{current_y}")
+        self._window_expanded_for_preview = False
+        self._current_preview_expand_width = 0
         self._preview_panel_visible = False
+        self._preview_autofit_pending = False
         self._clear_preview_canvas()
 
     def _on_target_changed(self, *_args) -> None:
@@ -844,6 +924,7 @@ class GuidecutApp(tk.Tk):
         self._close_preview_source()
         self._preview_source_image = image
         self._preview_source_path = loaded_path
+        self._preview_autofit_pending = True
         self._render_preview()
 
     def _handle_preview_error(self, payload: dict[str, object]) -> None:
@@ -859,19 +940,56 @@ class GuidecutApp(tk.Tk):
         if self.show_preview_var.get() and self._preview_source_image is not None:
             self._render_preview()
 
+    def _on_splitter_press(self, event: tk.Event) -> None:
+        if not self._preview_panel_visible:
+            return
+        self.update_idletasks()
+        self._splitter_drag_start_x = int(event.x_root)
+        self._splitter_drag_start_left_width = max(1, self.panel.winfo_width())
+
+    def _on_splitter_drag(self, event: tk.Event) -> None:
+        if not self._preview_panel_visible:
+            return
+        self.update_idletasks()
+        delta = int(event.x_root) - self._splitter_drag_start_x
+        requested_left_width = self._splitter_drag_start_left_width + delta
+        total_width = max(1, self.root_container.winfo_width())
+        reserved = PREVIEW_PANEL_MIN_WIDTH + PREVIEW_SPLITTER_WIDTH + PREVIEW_SPLITTER_PAD_X
+        max_left = max(UI_PANEL_MIN_WIDTH, total_width - reserved)
+        clamped_left = max(UI_PANEL_MIN_WIDTH, min(requested_left_width, max_left))
+        self._locked_left_panel_width = clamped_left
+        self.root_container.columnconfigure(0, weight=0, minsize=clamped_left)
+
+    def _on_splitter_release(self, _event: tk.Event) -> None:
+        if not self._preview_panel_visible:
+            return
+        self.update_idletasks()
+        self._locked_left_panel_width = max(UI_PANEL_MIN_WIDTH, self.panel.winfo_width())
+        self._update_preview_split_ratio()
+
     def _render_preview(self) -> None:
         if not self._preview_panel_visible or self._preview_source_image is None:
-            return
-
-        canvas_w = self.preview_canvas.winfo_width()
-        canvas_h = self.preview_canvas.winfo_height()
-        if canvas_w <= 4 or canvas_h <= 4:
             return
 
         source_w, source_h = self._preview_source_image.size
         if source_w <= 0 or source_h <= 0:
             self._clear_preview_canvas()
             self._set_preview_status("Unable to preview file: invalid image dimensions.")
+            return
+
+        if self._preview_autofit_pending:
+            canvas_w = self.preview_canvas.winfo_width()
+            canvas_h = self.preview_canvas.winfo_height()
+            if canvas_w <= 4 or canvas_h <= 4:
+                return
+            initial_scale = min(canvas_w / source_w, canvas_h / source_h)
+            initial_display_w = max(1, int(source_w * initial_scale))
+            self._autofit_preview_panel_to_image(initial_display_w, canvas_w)
+            self.update_idletasks()
+
+        canvas_w = self.preview_canvas.winfo_width()
+        canvas_h = self.preview_canvas.winfo_height()
+        if canvas_w <= 4 or canvas_h <= 4:
             return
 
         scale = min(canvas_w / source_w, canvas_h / source_h)
@@ -926,6 +1044,32 @@ class GuidecutApp(tk.Tk):
         source_name = self._preview_source_path.name if self._preview_source_path is not None else "Preview"
         self._set_preview_status(f"{source_name} ({source_w}x{source_h}px) | Grid {cols}x{rows}")
 
+    def _autofit_preview_panel_to_image(self, display_width_px: int, canvas_width_px: int) -> None:
+        if not self._preview_panel_visible:
+            self._preview_autofit_pending = False
+            return
+        self.update_idletasks()
+        panel_width = max(1, self.preview_panel.winfo_width())
+        non_canvas_width = max(0, panel_width - max(1, canvas_width_px))
+        desired_panel_width = max(PREVIEW_PANEL_MIN_WIDTH, display_width_px + non_canvas_width)
+        width_delta = panel_width - desired_panel_width
+        if width_delta <= AUTOFIT_WIDTH_TOLERANCE_PX:
+            self._preview_autofit_pending = False
+            return
+
+        current_w = self.winfo_width()
+        current_h = self.winfo_height()
+        current_x = self.winfo_x()
+        current_y = self.winfo_y()
+        new_w = max(BASE_WINDOW_MIN_WIDTH, current_w - width_delta)
+        self.root_container.columnconfigure(2, weight=1, minsize=desired_panel_width)
+        if new_w != current_w:
+            self.geometry(f"{new_w}x{current_h}+{current_x}+{current_y}")
+            self.update_idletasks()
+        self._current_preview_expand_width = max(0, self.root_container.winfo_width() - self.panel.winfo_width())
+        self._update_preview_split_ratio()
+        self._preview_autofit_pending = False
+
     def _load_persisted_state(self) -> None:
         try:
             state = load_ui_state(STATE_PATH)
@@ -938,6 +1082,7 @@ class GuidecutApp(tk.Tk):
         self.output_dir_var.set(state["output_dir"])
         self.input_var.set(state["input_dir"])
         self._pending_window_geometry = state["window_geometry"]
+        self._preview_split_ratio = float(state["preview_split_ratio"])
 
     def _apply_persisted_window_geometry(self) -> None:
         if not self._pending_window_geometry:
@@ -960,7 +1105,15 @@ class GuidecutApp(tk.Tk):
 
     def _on_close(self) -> None:
         self._preview_load_request_id += 1
+        self._update_preview_split_ratio()
         self._close_preview_source()
+        window_geometry = self._current_window_geometry()
+        if self._preview_panel_visible:
+            self.update_idletasks()
+            preview_allocation = max(0, self.root_container.winfo_width() - self.panel.winfo_width())
+            if preview_allocation > 0:
+                collapsed_width = max(BASE_WINDOW_MIN_WIDTH, self.winfo_width() - preview_allocation)
+                window_geometry = f"{collapsed_width}x{self.winfo_height()}+{self.winfo_x()}+{self.winfo_y()}"
         try:
             save_ui_state(
                 STATE_PATH,
@@ -968,7 +1121,8 @@ class GuidecutApp(tk.Tk):
                 specify_output_dir=self.specify_output_var.get(),
                 output_dir=self.output_dir_var.get(),
                 input_dir=self.input_var.get(),
-                window_geometry=self._current_window_geometry(),
+                window_geometry=window_geometry,
+                preview_split_ratio=self._preview_split_ratio,
             )
         except RuntimeError as exc:
             self._append_status(f"Warning: {exc}")
