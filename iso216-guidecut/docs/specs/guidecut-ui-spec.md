@@ -1,12 +1,12 @@
 # Guidecut UI Specification
 
-Status: Draft v0.7  
-Date: 2026-03-21
+Status: Draft v0.8  
+Date: 2026-05-30
 
 ## 1. Purpose
 Design a simple desktop UI for running `iso216_guidecut.py` without requiring terminal use.
 
-Initial pass focuses on collecting required script inputs, optional output-directory preference, and executing the tool.
+Current pass covers core run controls, preview integration, and expand-to-format controls.
 
 ## 2. Scope (Initial Feature Pass)
 1. File search/input field:
@@ -34,18 +34,25 @@ Initial pass focuses on collecting required script inputs, optional output-direc
 8. Session persistence:
 - On app close, persist selected target format, output settings, input-folder context, and window size/desktop location.
 - On next app launch, restore persisted target format, output settings, input-folder context, and window size/desktop location.
+9. Expand-to-format controls:
+- `Expand to Format` toggle in main form.
+- Hidden trim-bias slider row shown only when expand is enabled.
+- Slider range `0..100`, default `50.0`.
+- If source has no excess trim axis (already ISO ratio), slider is disabled and shown as no-op.
 
 ## 3. Non-Goals (Initial Pass)
 - Batch mode (multiple files).
 - Advanced export options.
-- Visual preview of tile layout.
+- Multi-file queueing and scheduling.
 
 ## 4. Layout
 Current layout in the implemented UI:
 
 ### 4.1 Window and Container Structure
-- The main window contains one root app frame and one primary panel frame.
-- The primary panel is the only content column and fills the available window width and height.
+- The main window contains one root app frame with:
+  - primary control panel (always visible),
+  - optional preview splitter + preview panel (visible when preview is enabled).
+- Without preview, the primary panel fills the available window width and height.
 - The panel uses a 3-column grid:
   - Column 0: field labels.
   - Column 1: primary input controls (expands horizontally).
@@ -54,13 +61,15 @@ Current layout in the implemented UI:
 ### 4.2 Row-by-Row Element Placement
 1. Row 0: usage instructions label, spanning all 3 columns.
 2. Row 1: `Input File` label (col 0), rounded input field (col 1), `Browse...` button (col 2).
-3. Row 3: `Specify output directory` toggle, spanning all 3 columns.
+3. Row 3: `Specify output directory` toggle on the left, `Show preview` toggle on the right.
 4. Row 4: output-directory row (hidden by default), spanning all 3 columns.
 - Inside row 4:
   - rounded output-directory field (expanding left section),
   - `Browse Output...` button (right section).
-5. Row 5: action row, spanning all 3 columns.
-- Inside row 5:
+5. Row 5: `Expand to Format` toggle row.
+6. Row 6: expand-bias slider row (hidden unless expand is enabled).
+7. Row 7: action row, spanning all 3 columns.
+- Inside row 7:
   - compact `Target Format` cluster at the left edge:
     - `Target Format` label,
     - fixed-width rounded dropdown (non-expanding) sized tightly to its clickable area,
@@ -68,12 +77,12 @@ Current layout in the implemented UI:
   - flexible spacer between target-format cluster and action buttons,
   - `Open Folder` button,
   - `Run` button on the far right.
-6. Row 6: status/output region, spanning all 3 columns and expanding vertically.
+8. Row 8: status/output region, spanning all 3 columns and expanding vertically.
 
 ### 4.3 Resize Behavior
 - The panel expands with the window.
 - Primary field column (column 1) grows horizontally.
-- Status/output region (row 6) takes additional vertical space.
+- Status/output region (row 8) takes additional vertical space.
 - Layout must not include an unused expanding right-side spacer area.
 - Target-format dropdown width remains fixed and does not stretch with window resize.
 - Target-format dropdown must not render non-clickable dead padding inside its visual bounds.
@@ -165,12 +174,30 @@ Current layout in the implemented UI:
   - `Target Format`
   - `Specify output directory` toggle state
   - `Output Directory` value
+  - `Expand to Format` toggle state
+  - `Expand bias percent`
 - `Input File` folder context only (filename is removed before persist)
 - Window geometry (`width x height + x + y`) for size and desktop position
 - Restore these values on startup.
 - Do not persist input filename.
 - If persisted data is missing/invalid:
   - fall back to defaults (`A2`, toggle off, empty output directory, empty input-folder context, platform default window placement/size).
+
+### 5.10 Expand-to-Format UX Behavior
+- Toggle off:
+  - expand arguments are not sent to CLI,
+  - slider row stays hidden.
+- Toggle on:
+  - slider row is shown,
+  - slider value controls trim-bias percentage (`0..100`).
+- Bias semantics in UI must match CLI:
+  - `0%` preserves left/top side,
+  - `100%` preserves right/bottom side.
+- Document-scoped session behavior:
+  - turning expand off then on for the same selected file retains current bias,
+  - changing the selected input document resets expand toggle to off and bias to `50%`,
+  - after run completion, reset expand toggle to off and bias to `50%` (input filename is already cleared to folder context).
+- No per-file cross-restart memory is required.
 
 ## 6. Script Integration Contract
 Base command form:
@@ -185,6 +212,12 @@ With explicit output directory enabled:
 python iso216_guidecut.py "<input_path>" "<target_format>" --output "<output_path>"
 ```
 
+With expand mode enabled:
+
+```powershell
+python iso216_guidecut.py "<input_path>" "<target_format>" --expand-to-format --expand-bias-percent "<0..100>"
+```
+
 Execution details:
 - Working directory: `iso216-guidecut` folder.
 - Must preserve quoted file paths to support spaces.
@@ -192,6 +225,7 @@ Execution details:
 - Output path construction when explicit output directory is provided:
   - `<output_dir>\<input-stem>-guidecut-<target-format>-<YYYYMMDD-HHMMSS>.pdf`
 - If explicit output-directory field is empty, do not pass `--output`; use script default location (source file directory).
+- Pass expand args only when expand toggle is enabled.
 - Exit code handling:
   - `0`: success message with generated output path.
   - non-zero: error message with stderr content.
@@ -230,6 +264,8 @@ Execution details:
 11. A simple usage instruction block is visible above the input field.
 12. After app restart, target format, output settings, and input-folder context are restored from previous session.
 13. After app restart, window size and desktop location are restored from previous session when valid persisted geometry exists.
+14. Enabling `Expand to Format` reveals bias slider and running passes expand args to CLI.
+15. Bias slider and preview interactions stay synchronized for the active document (document change and post-run reset behavior are enforced).
 
 ## 10. Suggested Implementation Notes
 - Recommended stack for first implementation: Python `tkinter` (no extra dependency).

@@ -1,13 +1,13 @@
 ﻿# Guidecut Cut Preview Feature Spec
 
-Status: Draft v0.1  
-Date: 2026-03-21
+Status: Draft v0.2  
+Date: 2026-05-30
 
 ## 1. Purpose
 Add an in-app visual cut preview so users can verify tile boundaries before running Guidecut.
 
 ## 2. Scope
-This feature adds a right-side preview panel and a `Show preview` toggle tied to the selected input document and current target format.
+This feature adds a right-side preview panel and a `Show preview` toggle tied to the selected input document and current target format. It also integrates expand-to-format preview behavior and drag-driven trim bias adjustment.
 
 ## 3. Functional Requirements
 1. When a document is selected, a `Show preview` toggle appears on the same row as `Specify output directory`, aligned to the right side.
@@ -22,6 +22,9 @@ This feature adds a right-side preview panel and a `Show preview` toggle tied to
 10. Last used UI/preview split dimensions must persist after preview collapse so re-enabling preview restores the prior split state relative to current UI-panel size.
 11. On preview open, auto-fit preview panel width to the rendered preview image width (plus required panel chrome) so avoidable x-axis whitespace is removed.
 12. Repeated preview show/hide cycles and app restarts must not cause cumulative window-width growth.
+13. When `Expand to Format` is enabled, preview renders and guides must use the effective cropped working area.
+14. While expand mode is enabled and an excess trim axis exists, dragging the preview image along the excess axis must update expand bias in real time.
+15. Preview drag and expand bias slider must remain synchronized bidirectionally.
 
 ## 4. UI Layout
 ### 4.1 Main Structure
@@ -69,8 +72,28 @@ This feature adds a right-side preview panel and a `Show preview` toggle tied to
 - Overlay updates immediately when target format changes.
 - Guide color should be selected from a high-contrast palette using sampled pixels under/near each guide path.
 - If measured contrast is still weak, render a secondary outline/halo stroke behind the guide for legibility.
+- Expand-mode interaction:
+  - When expand mode is enabled, compute crop rectangle first, then render preview from the cropped working area.
+  - Guide geometry is computed against cropped dimensions, not original source dimensions.
+  - If source has no excess trim axis, drag behavior is disabled and slider is no-op/disabled.
 
-### 5.3 Toggle Off
+### 5.3 Expand Drag and Slider Sync
+- Drag gesture is active only when:
+  - preview is visible,
+  - expand mode is enabled,
+  - a valid source is loaded,
+  - computed crop has an excess axis (`x` or `y`).
+- Drag direction:
+  - excess on `x`: horizontal drag updates bias.
+  - excess on `y`: vertical drag updates bias.
+- Mapping:
+  - drag delta maps proportionally to leading trim amount on the excess axis.
+  - resulting bias is clamped to `[0,100]`.
+- Synchronization:
+  - drag updates slider value live,
+  - slider changes redraw preview live and update effective crop.
+
+### 5.4 Toggle Off
 - When `Show preview` is off:
   - Hide the right preview panel.
   - Keep existing left-panel controls unaffected.
@@ -92,6 +115,8 @@ This feature adds a right-side preview panel and a `Show preview` toggle tied to
 - On startup, preview defaults to off/hidden.
 - `Show preview` becomes available only after a valid input file is selected.
 - Persist preview split ratio (UI pane vs preview pane) so split preference survives collapse/reopen and app restart.
+- Expand state is persisted as part of UI state schema, but per-document memory is session-only.
+- Because input filename is cleared to folder context after run/startup, expand controls naturally reset to defaults when no valid file is active.
 
 ## 7. Performance and Reliability
 - Preview updates must not block the UI event loop.
@@ -99,6 +124,7 @@ This feature adds a right-side preview panel and a `Show preview` toggle tied to
 - Failures in preview loading should not affect run/open-folder functionality.
 - Contrast analysis for guide color should remain lightweight enough for interactive resize (sampling-based, not full-image analysis).
 - Contrast recompute after panel resize should be debounce/settle-based (after resize drag ends), not on every intermediate mouse-move resize event.
+- Expand drag updates should use fast redraw during motion and defer heavier contrast recompute to debounce/settle timing.
 
 ## 8. Non-Goals (Initial Pass)
 - Zoom/pan controls.
@@ -122,6 +148,8 @@ This feature adds a right-side preview panel and a `Show preview` toggle tied to
 13. After preview is hidden, showing preview again restores pane split sizing based on the last saved split ratio and current UI pane width.
 14. Enabling preview auto-collapses panel width to content width so avoidable horizontal whitespace is minimized.
 15. Across repeated app restarts and preview toggles, window width remains stable (no progressive growth drift).
+16. With expand mode enabled, preview guides align to cropped working area and match CLI crop semantics.
+17. Dragging preview along excess axis updates trim bias live and remains synchronized with slider value.
 
 ## 10. Implementation Notes
 - Tkinter baseline:

@@ -1,7 +1,7 @@
 # ISO216 Guideline Cutter Tool Specification
 
-Status: Draft v1.0  
-Date: 2026-03-21
+Status: Draft v1.1  
+Date: 2026-05-30
 
 ## 1. Purpose
 This tool takes an input document/image and a target ISO216 format (`a3`, `a2`, `a1`, or `a0`), computes guide positions that represent bisection cut lines, and exports all tiles into a single multi-page PDF intended for A4 printing and physical assembly.
@@ -27,7 +27,20 @@ The source file may have non-standard internal dimensions. The tool does not rej
 - Case-insensitive input is allowed (`A2` accepted, normalized to `a2`)
 - Any other value must fail with a clear error message and non-zero exit code
 
-### 3.3 Backend Requirement
+### 3.3 Optional Expand-to-Format Parameters
+- `--expand-to-format` (boolean flag)
+- `--expand-bias-percent <0..100>` (float, default `50.0`)
+
+Behavior:
+- When expand mode is enabled, pre-crop source to ISO216 aspect ratio before guide/grid/tile math.
+- Bias semantics:
+  - `0%`: preserve left/top side content (trim accumulates on right/bottom).
+  - `100%`: preserve right/bottom side content (trim accumulates on left/top).
+  - `50%`: center trim split.
+- If the source already matches ISO ratio (or no excess trim axis exists), no crop is applied.
+- Expand args are ignored unless `--expand-to-format` is set.
+
+### 3.4 Backend Requirement
 - GIMP is not required.
 - Default implementation backend is Pillow/Python.
 - Optional future backends (including GIMP batch mode) must preserve the same CLI contract and output behavior.
@@ -35,11 +48,23 @@ The source file may have non-standard internal dimensions. The tool does not rej
 ## 4. Functional Requirements
 ### 4.1 High-Level Flow
 1. Load source file via the selected image backend (default: Pillow).
-2. Detect orientation from source dimensions.
-3. Compute bisection grid from `target_format` and orientation.
-4. Compute vertical/horizontal guide positions at cut lines.
-5. Generate tile crop rectangles from the guide grid.
-6. Export all tiles into one multi-page PDF with deterministic page ordering.
+2. If expand mode is enabled, compute and apply pre-crop rectangle to enforce ISO216 ratio.
+3. Detect orientation from working dimensions (cropped dimensions when expand is enabled).
+4. Compute bisection grid from `target_format` and orientation.
+5. Compute vertical/horizontal guide positions at cut lines.
+6. Generate tile crop rectangles from the guide grid.
+7. Export all tiles into one multi-page PDF with deterministic page ordering.
+
+### 4.1.1 Expand-to-Format Crop Math
+- Determine working target ratio from source orientation:
+  - landscape source: `sqrt(2):1`
+  - portrait/square source: `1:sqrt(2)`
+- Detect excess axis:
+  - too wide -> trim on `x`
+  - too tall -> trim on `y`
+- Compute retained crop dimension that best matches target ratio.
+- Split excess trim using `expand_bias_percent`.
+- Apply the resulting crop rectangle before all grid/guide/page calculations.
 
 ### 4.2 Orientation Detection
 Implement a dedicated function before guide placement:
@@ -110,6 +135,7 @@ Example for `a2` (2x2) page sequence:
 Hard failures (non-zero exit):
 - Input path does not exist or is unreadable.
 - Unsupported target format.
+- Invalid `--expand-bias-percent` value (outside `[0,100]` or non-numeric).
 - Output file path cannot be created/written.
 - Export failure for any page or final combined PDF write.
 
@@ -124,8 +150,11 @@ Soft warnings (continue):
 4. `compute_guides(width_px: int, height_px: int, cols: int, rows: int) -> (v_guides, h_guides)`
 5. `compute_tile_crop(col_ltr: int, row_ttb: int, cols: int, rows: int, width_px: int, height_px: int) -> Rect`
 6. `ordered_tiles(cols: int, rows: int) -> list[(col_ltr, row_ttb)]`  (row-major: top-to-bottom, left-to-right)
-7. `build_output_path(input_path: str, target: str, now_local: datetime) -> output_pdf_path`
-8. `export_tiles_to_multipage_pdf(image, ordered_rects, output_path, preserve_profile=True, preserve_metadata=True) -> None`
+7. `clamp_expand_bias_percent(value: float|int, default=50.0) -> float`
+8. `parse_expand_bias_percent(value) -> float`
+9. `compute_expand_crop_rect(width_px: int, height_px: int, bias_percent: float|int) -> ExpandCrop`
+10. `build_output_path(input_path: str, target: str, now_local: datetime) -> output_pdf_path`
+11. `export_tiles_to_multipage_pdf(image, ordered_rects, output_path, preserve_profile=True, preserve_metadata=True) -> None`
 
 ## 7. Non-Functional Requirements
 - Deterministic output naming and page ordering.
@@ -140,6 +169,8 @@ Soft warnings (continue):
 4. Guides are created at the expected bisection positions.
 5. Orientation detection changes split axis selection correctly for odd split counts (`a3`, `a1`).
 6. Color profile and metadata are preserved when supported; warnings are logged otherwise.
+7. When expand mode is enabled, crop occurs before guide/grid computation and output geometry reflects cropped dimensions.
+8. Expand bias endpoints are correct (`0%` left/top anchored, `100%` right/bottom anchored).
 
 ## 9. Test Plan
 ### 9.1 Unit Tests
@@ -149,6 +180,9 @@ Soft warnings (continue):
 - Guide position math
 - Page ordering generation (row-major: top-to-bottom, left-to-right)
 - Filesystem-safe output filename generation
+- Expand crop rectangle math for too-wide/too-tall sources
+- Expand bias endpoint and clamping behavior (`0`, `50`, `100`)
+- Expand no-op behavior for already ISO-ratio sources
 
 ### 9.2 Integration Tests
 - One fixture each for `a3`, `a2`, `a1`, `a0`
@@ -156,8 +190,11 @@ Soft warnings (continue):
 - Verify PDF page count, page order, and bounding geometry
 - Verify output PDF location (beside source)
 - Verify metadata/profile preservation path on supported sample files
+- Verify expand-on run uses cropped working geometry for tile/page boundaries
+- Verify expand-off run behavior remains unchanged from baseline
 
 ### 9.3 Regression Tests
 - Timestamp format remains filesystem-safe
 - Page order remains top-to-bottom, left-to-right across all targets
 - Non-ISO source dimensions still process without hard failure
+- Expand arguments are only applied when `--expand-to-format` is explicitly enabled

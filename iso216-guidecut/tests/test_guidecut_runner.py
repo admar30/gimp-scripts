@@ -21,8 +21,11 @@ from guidecut_runner import (
     browse_initial_directory,
     build_command,
     build_output_pdf_path,
+    clamp_expand_bias_percent,
     choose_guide_style,
     contrast_ratio,
+    expand_crop_for_source,
+    expand_excess_axis,
     GUIDE_CONTRAST_HALO_THRESHOLD,
     load_ui_state,
     normalize_target_format,
@@ -40,6 +43,7 @@ from guidecut_runner import (
     sample_line_luminance,
     save_ui_state,
     sanitize_preview_split_ratio,
+    sanitize_expand_bias_percent,
     sanitize_ui_state,
     persisted_input_directory,
     sanitize_window_geometry,
@@ -207,6 +211,8 @@ def test_sanitize_ui_state_defaults_on_bad_values() -> None:
     assert state["input_dir"] == ""
     assert state["window_geometry"] == ""
     assert state["preview_split_ratio"] == DEFAULT_UI_STATE["preview_split_ratio"]
+    assert state["expand_to_format"] is DEFAULT_UI_STATE["expand_to_format"]
+    assert state["expand_bias_percent"] == DEFAULT_UI_STATE["expand_bias_percent"]
 
 
 def test_sanitize_window_geometry_accepts_valid_and_rejects_invalid() -> None:
@@ -222,6 +228,28 @@ def test_sanitize_preview_split_ratio_bounds_and_defaults() -> None:
     assert sanitize_preview_split_ratio("1.25") == 1.25
     assert sanitize_preview_split_ratio(0.1) == DEFAULT_UI_STATE["preview_split_ratio"]
     assert sanitize_preview_split_ratio("bad") == DEFAULT_UI_STATE["preview_split_ratio"]
+
+
+def test_sanitize_expand_bias_percent_bounds_and_defaults() -> None:
+    assert sanitize_expand_bias_percent(0) == 0.0
+    assert sanitize_expand_bias_percent(100) == 100.0
+    assert sanitize_expand_bias_percent(-5) == 0.0
+    assert sanitize_expand_bias_percent(105) == 100.0
+    assert sanitize_expand_bias_percent("bad") == DEFAULT_UI_STATE["expand_bias_percent"]
+
+
+def test_expand_helpers_return_expected_axis_and_crop() -> None:
+    assert expand_excess_axis(1000, 500) == "x"
+    assert expand_excess_axis(500, 1000) == "y"
+    crop = expand_crop_for_source(1000, 500, 50)
+    assert crop.excess_px > 0
+    assert crop.axis == "x"
+
+
+def test_clamp_expand_bias_percent_from_runner() -> None:
+    assert clamp_expand_bias_percent(-10) == 0.0
+    assert clamp_expand_bias_percent(120) == 100.0
+    assert clamp_expand_bias_percent("bad", default=33.0) == 33.0
 
 
 def test_relative_luminance_monotonicity_black_gray_white() -> None:
@@ -314,6 +342,8 @@ def test_save_and_load_ui_state_round_trip(monkeypatch: pytest.MonkeyPatch) -> N
         input_dir="C:/maps/arena.avif",
         window_geometry="1280x720+80+90",
         preview_split_ratio=0.75,
+        expand_to_format=True,
+        expand_bias_percent=65.0,
     )
     loaded = load_ui_state(state_path)
     assert loaded["target_format"] == "a1"
@@ -322,6 +352,8 @@ def test_save_and_load_ui_state_round_trip(monkeypatch: pytest.MonkeyPatch) -> N
     assert loaded["input_dir"] == str(Path("C:/maps").resolve())
     assert loaded["window_geometry"] == "1280x720+80+90"
     assert loaded["preview_split_ratio"] == 0.75
+    assert loaded["expand_to_format"] is True
+    assert loaded["expand_bias_percent"] == 65.0
 
 
 def test_load_ui_state_returns_defaults_when_missing(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -397,6 +429,36 @@ def test_build_command_normalizes_target_case() -> None:
         output_path=None,
     )
     assert command[-1] == "a2"
+
+
+def test_build_command_with_expand_args() -> None:
+    command = build_command(
+        python_executable="python",
+        script_path=Path("iso216_guidecut.py"),
+        input_path=Path("C:/in/file.avif"),
+        target_format="A2",
+        output_path=None,
+        expand_to_format=True,
+        expand_bias_percent=33.5,
+    )
+    assert "--expand-to-format" in command
+    assert "--expand-bias-percent" in command
+    bias_index = command.index("--expand-bias-percent")
+    assert command[bias_index + 1] == "33.5"
+
+
+def test_build_command_without_expand_args_when_disabled() -> None:
+    command = build_command(
+        python_executable="python",
+        script_path=Path("iso216_guidecut.py"),
+        input_path=Path("C:/in/file.avif"),
+        target_format="A2",
+        output_path=None,
+        expand_to_format=False,
+        expand_bias_percent=75.0,
+    )
+    assert "--expand-to-format" not in command
+    assert "--expand-bias-percent" not in command
 
 
 def test_resolve_open_folder_prefers_explicit_output_dir() -> None:

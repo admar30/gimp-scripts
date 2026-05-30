@@ -29,6 +29,20 @@ Optional explicit output path:
 python iso216-guidecut/cli/iso216_guidecut.py C:\path\poster.png a1 --output C:\path\poster-cut.pdf
 ```
 
+Optional expand-to-format pre-crop:
+```powershell
+python iso216-guidecut/cli/iso216_guidecut.py C:\path\poster.png a1 --expand-to-format
+```
+
+Optional expand bias (`0..100`, default `50`):
+```powershell
+python iso216-guidecut/cli/iso216_guidecut.py C:\path\poster.png a1 --expand-to-format --expand-bias-percent 35
+```
+
+Expand bias semantics:
+- `0%`: preserve left/top content, trim right/bottom.
+- `100%`: preserve right/bottom content, trim left/top.
+
 ### UI
 Launch the desktop UI:
 
@@ -48,17 +62,22 @@ UI interactions in current pass:
 - `Specify output directory` toggle reveals/hides explicit output controls.
 - Output directory supports manual typing and `Browse Output...`; missing directories are auto-created on run.
 - `Open Folder` resolves to explicit output directory when enabled and set, otherwise resolves from input path (file parent or folder path).
+- `Expand to Format` toggle enables pre-crop to ISO ratio before guides/tiles are computed.
+- Expand bias slider (`0..100`) appears only when expand mode is on; slider is disabled when source has no excess trim axis.
 - `Run` executes in a background thread and streams stdout/stderr to the status panel.
 - Post-run input behavior keeps only the source folder path (filename cleared) to speed up selecting the next file.
+- Post-run expand behavior resets to defaults (`Expand to Format` off, bias `50%`).
 - `Show preview` toggle appears only when `Input File` resolves to an existing file.
 - Enabling preview opens a right-side preview panel, expanding the app to the right without compressing left-side controls.
 - Preview panel includes a draggable vertical divider for resizing UI-vs-preview width allocation.
 - Preview panel auto-fits width to rendered content on open and avoids cumulative window-size drift across reopen/restart cycles.
 - Preview displays guide overlays for the selected target format and updates when target format changes.
+- With expand mode enabled, preview renders cropped working area and guides against cropped geometry.
+- Preview image drag along excess trim axis updates expand bias live and stays synchronized with the slider.
 - Guide overlays use adaptive contrast sampling (with optional halo stroke) for visibility on dark/light/mixed documents.
 - Preview redraw during resize is responsive; heavier contrast recompute is deferred until resize settles.
 - Preview toggle state is not persisted; it resets off/hidden on startup when no valid file is selected.
-- Persistent settings on close/reopen: target format, output toggle/value, input-folder context, window geometry (size/position), and preview split ratio.
+- Persistent settings on close/reopen: target format, output toggle/value, input-folder context, window geometry (size/position), preview split ratio, and expand settings.
 
 ### Supported targets
 - `a3`

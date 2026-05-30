@@ -29,6 +29,7 @@ TARGET_SPLITS = {
 }
 
 ISO216_ASPECT_RATIO = math.sqrt(2.0)
+DEFAULT_EXPAND_BIAS_PERCENT = 50.0
 
 
 @dataclass(frozen=True)
@@ -41,6 +42,16 @@ class Rect:
     @property
     def box(self) -> tuple[int, int, int, int]:
         return (self.x0, self.y0, self.x1, self.y1)
+
+
+@dataclass(frozen=True)
+class ExpandCrop:
+    rect: Rect
+    axis: str | None
+    excess_px: int
+    leading_trim_px: int
+    trailing_trim_px: int
+    bias_percent: float
 
 
 def parse_target_format(value: str) -> str:
@@ -111,6 +122,119 @@ def is_near_iso216_ratio(width_px: int, height_px: int, tolerance: float = 0.03)
         return False
     ratio = max(width_px, height_px) / min(width_px, height_px)
     return abs(ratio - ISO216_ASPECT_RATIO) <= tolerance
+
+
+def clamp_expand_bias_percent(value: float | int, default: float = DEFAULT_EXPAND_BIAS_PERCENT) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        parsed = float(default)
+    return max(0.0, min(100.0, parsed))
+
+
+def parse_expand_bias_percent(value: float | int | str) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Expand bias percent must be a number in [0, 100], got '{value}'.") from exc
+    if not (0.0 <= parsed <= 100.0):
+        raise ValueError(f"Expand bias percent must be in [0, 100], got {parsed}.")
+    return parsed
+
+
+def _target_ratio_for_orientation(orientation: str) -> float:
+    if orientation == "landscape":
+        return ISO216_ASPECT_RATIO
+    return 1.0 / ISO216_ASPECT_RATIO
+
+
+def compute_expand_crop_rect(width_px: int, height_px: int, bias_percent: float | int) -> ExpandCrop:
+    if width_px <= 0 or height_px <= 0:
+        raise ValueError("Image dimensions must be positive.")
+
+    orientation = detect_orientation(width_px, height_px)
+    target_ratio = _target_ratio_for_orientation(orientation)
+    bias = clamp_expand_bias_percent(bias_percent)
+    source_ratio = width_px / height_px
+
+    if is_near_iso216_ratio(width_px, height_px, tolerance=0.001):
+        rect = Rect(0, 0, width_px, height_px)
+        return ExpandCrop(
+            rect=rect,
+            axis=None,
+            excess_px=0,
+            leading_trim_px=0,
+            trailing_trim_px=0,
+            bias_percent=bias,
+        )
+
+    if math.isclose(source_ratio, target_ratio, rel_tol=0.0, abs_tol=1e-12):
+        rect = Rect(0, 0, width_px, height_px)
+        return ExpandCrop(
+            rect=rect,
+            axis=None,
+            excess_px=0,
+            leading_trim_px=0,
+            trailing_trim_px=0,
+            bias_percent=bias,
+        )
+
+    if source_ratio > target_ratio:
+        # Too wide: trim horizontally.
+        new_width = max(1, min(width_px, int(round(height_px * target_ratio))))
+        excess = max(0, width_px - new_width)
+        if excess <= 0:
+            rect = Rect(0, 0, width_px, height_px)
+            return ExpandCrop(
+                rect=rect,
+                axis=None,
+                excess_px=0,
+                leading_trim_px=0,
+                trailing_trim_px=0,
+                bias_percent=bias,
+            )
+        leading_trim = int(round(excess * (bias / 100.0)))
+        leading_trim = max(0, min(excess, leading_trim))
+        trailing_trim = excess - leading_trim
+        x0 = leading_trim
+        x1 = width_px - trailing_trim
+        rect = Rect(x0, 0, x1, height_px)
+        return ExpandCrop(
+            rect=rect,
+            axis="x",
+            excess_px=excess,
+            leading_trim_px=leading_trim,
+            trailing_trim_px=trailing_trim,
+            bias_percent=bias,
+        )
+
+    # Too tall: trim vertically.
+    new_height = max(1, min(height_px, int(round(width_px / target_ratio))))
+    excess = max(0, height_px - new_height)
+    if excess <= 0:
+        rect = Rect(0, 0, width_px, height_px)
+        return ExpandCrop(
+            rect=rect,
+            axis=None,
+            excess_px=0,
+            leading_trim_px=0,
+            trailing_trim_px=0,
+            bias_percent=bias,
+        )
+    leading_trim = int(round(excess * (bias / 100.0)))
+    leading_trim = max(0, min(excess, leading_trim))
+    trailing_trim = excess - leading_trim
+    y0 = leading_trim
+    y1 = height_px - trailing_trim
+    rect = Rect(0, y0, width_px, y1)
+    return ExpandCrop(
+        rect=rect,
+        axis="y",
+        excess_px=excess,
+        leading_trim_px=leading_trim,
+        trailing_trim_px=trailing_trim,
+        bias_percent=bias,
+    )
 
 
 def build_output_path(input_path: Path, target: str, now_local: datetime | None = None) -> Path:
@@ -264,6 +388,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Only print errors.",
     )
+    parser.add_argument(
+        "--expand-to-format",
+        action="store_true",
+        help="Crop input to ISO216 aspect ratio before guide split.",
+    )
+    parser.add_argument(
+        "--expand-bias-percent",
+        type=float,
+        default=DEFAULT_EXPAND_BIAS_PERCENT,
+        help=(
+            "Bias for expand crop in [0,100]. 0 keeps left/top content, "
+            "100 keeps right/bottom content."
+        ),
+    )
     return parser
 
 
@@ -273,6 +411,12 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     try:
         target = parse_target_format(args.target_format)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
+    try:
+        expand_bias_percent = parse_expand_bias_percent(args.expand_bias_percent)
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 2
@@ -291,13 +435,27 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
 
     try:
-        width_px, height_px = src.size
+        working_image = src
+        working_image_owned = False
+        original_width_px, original_height_px = src.size
+        crop_info: ExpandCrop | None = None
+        warnings: list[str] = []
+
+        if args.expand_to_format:
+            crop_info = compute_expand_crop_rect(original_width_px, original_height_px, expand_bias_percent)
+            if crop_info.excess_px > 0:
+                cropped = src.crop(crop_info.rect.box)
+                # Preserve metadata/profile hints for export.
+                cropped.info = dict(src.info)
+                working_image = cropped
+                working_image_owned = True
+
+        width_px, height_px = working_image.size
         orientation = detect_orientation(width_px, height_px)
         cols, rows = compute_grid(target, orientation)
         v_guides, h_guides = compute_guides(width_px, height_px, cols, rows)
-        warnings: list[str] = []
 
-        if not is_near_iso216_ratio(width_px, height_px):
+        if not args.expand_to_format and not is_near_iso216_ratio(width_px, height_px):
             warnings.append(
                 "Source dimensions are non-ISO ratio; continuing with guide split based on source canvas."
             )
@@ -310,7 +468,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         warnings.extend(
             export_tiles_to_multipage_pdf(
-            image=src,
+            image=working_image,
             ordered_rects=rects,
             output_path=output_path,
             preserve_profile=True,
@@ -321,11 +479,34 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(str(exc), file=sys.stderr)
         return 1
     finally:
+        if "working_image_owned" in locals() and working_image_owned:
+            working_image.close()
         src.close()
 
     if not args.quiet:
         print(f"Input: {input_path}")
         print(f"Target format: {target}")
+        if args.expand_to_format:
+            if crop_info is None:
+                print(f"Expand to format: enabled (bias={expand_bias_percent:.2f}%)")
+            elif crop_info.excess_px <= 0:
+                print(
+                    f"Expand to format: enabled (bias={crop_info.bias_percent:.2f}%), "
+                    "source already matches ISO ratio."
+                )
+            else:
+                axis_label = "horizontal (left/right trim)" if crop_info.axis == "x" else "vertical (top/bottom trim)"
+                print(
+                    f"Expand to format: enabled (bias={crop_info.bias_percent:.2f}%), "
+                    f"{axis_label}, trimmed {crop_info.excess_px}px."
+                )
+                print(
+                    "Expanded crop: "
+                    f"{crop_info.rect.x0},{crop_info.rect.y0} -> {crop_info.rect.x1},{crop_info.rect.y1} "
+                    f"({original_width_px}x{original_height_px} -> {width_px}x{height_px})"
+                )
+        else:
+            print("Expand to format: disabled")
         print(f"Orientation: {orientation}")
         print(f"Grid: {cols}x{rows} ({cols * rows} pages)")
         print(f"Vertical guides (px): {_format_int_list(v_guides)}")

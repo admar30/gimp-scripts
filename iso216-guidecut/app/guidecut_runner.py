@@ -20,7 +20,14 @@ CLI_DIR = MODULE_ROOT / "cli"
 if str(CLI_DIR) not in sys.path:
     sys.path.insert(0, str(CLI_DIR))
 
-from iso216_guidecut import compute_grid, compute_guides, detect_orientation, parse_target_format
+from iso216_guidecut import (
+    clamp_expand_bias_percent as cli_clamp_expand_bias_percent,
+    compute_expand_crop_rect,
+    compute_grid,
+    compute_guides,
+    detect_orientation,
+    parse_target_format,
+)
 
 
 SUPPORTED_FORMATS = ("a3", "a2", "a1", "a0")
@@ -39,6 +46,8 @@ DEFAULT_UI_STATE = {
     "input_dir": "",
     "window_geometry": "",
     "preview_split_ratio": 0.5,
+    "expand_to_format": False,
+    "expand_bias_percent": 50.0,
 }
 
 GUIDE_PRIMARY_CANDIDATES = (
@@ -237,6 +246,8 @@ def build_command(
     input_path: Path,
     target_format: str,
     output_path: Path | None = None,
+    expand_to_format: bool = False,
+    expand_bias_percent: float | int = 50.0,
 ) -> list[str]:
     target = normalize_target_format(target_format)
     command = [
@@ -247,6 +258,9 @@ def build_command(
     ]
     if output_path is not None:
         command.extend(["--output", str(output_path)])
+    if expand_to_format:
+        bias = clamp_expand_bias_percent(expand_bias_percent)
+        command.extend(["--expand-to-format", "--expand-bias-percent", f"{bias:.4g}"])
     return command
 
 
@@ -310,6 +324,19 @@ def preview_guides_for_source(
     return cols, rows, vertical, horizontal
 
 
+def clamp_expand_bias_percent(value, default: float | int = 50.0) -> float:  # noqa: ANN001
+    return cli_clamp_expand_bias_percent(value, default=float(default))
+
+
+def expand_excess_axis(width_px: int, height_px: int, bias_percent: float | int = 50.0) -> str | None:
+    crop_info = compute_expand_crop_rect(width_px, height_px, bias_percent)
+    return crop_info.axis
+
+
+def expand_crop_for_source(width_px: int, height_px: int, bias_percent: float | int = 50.0):
+    return compute_expand_crop_rect(width_px, height_px, clamp_expand_bias_percent(bias_percent))
+
+
 def browse_initial_directory(input_path_value: str) -> str | None:
     if not input_path_value.strip():
         return None
@@ -352,6 +379,10 @@ def sanitize_preview_split_ratio(value) -> float:  # noqa: ANN001
     return ratio
 
 
+def sanitize_expand_bias_percent(value) -> float:  # noqa: ANN001
+    return clamp_expand_bias_percent(value, default=float(DEFAULT_UI_STATE["expand_bias_percent"]))
+
+
 def _coerce_bool(value) -> bool:  # noqa: ANN001
     if isinstance(value, bool):
         return value
@@ -385,6 +416,8 @@ def sanitize_ui_state(raw: dict | None) -> dict:
     window_geometry = raw.get("window_geometry", state["window_geometry"])
     state["window_geometry"] = sanitize_window_geometry(str(window_geometry) if window_geometry is not None else "")
     state["preview_split_ratio"] = sanitize_preview_split_ratio(raw.get("preview_split_ratio"))
+    state["expand_to_format"] = _coerce_bool(raw.get("expand_to_format", state["expand_to_format"]))
+    state["expand_bias_percent"] = sanitize_expand_bias_percent(raw.get("expand_bias_percent"))
     return state
 
 
@@ -411,6 +444,8 @@ def save_ui_state(
     input_dir: str = "",
     window_geometry: str = "",
     preview_split_ratio: float | int = 0.5,
+    expand_to_format: bool = False,
+    expand_bias_percent: float | int = 50.0,
 ) -> None:
     state = sanitize_ui_state(
         {
@@ -420,6 +455,8 @@ def save_ui_state(
             "input_dir": input_dir,
             "window_geometry": window_geometry,
             "preview_split_ratio": preview_split_ratio,
+            "expand_to_format": expand_to_format,
+            "expand_bias_percent": expand_bias_percent,
         }
     )
     try:
