@@ -628,10 +628,10 @@ class GuidecutApp(tk.Tk):
             variable=self.expand_to_format_var,
             command=self._on_expand_toggle,
         )
-        self.expand_toggle.grid(row=5, column=0, columnspan=2, sticky="w", pady=(0, SPACING["sm"]))
+        self.expand_toggle.grid(row=5, column=0, sticky="w", pady=(0, SPACING["sm"]))
 
         self.expand_row = ttk.Frame(panel, style="Panel.TFrame")
-        self.expand_row.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(0, SPACING["sm"]))
+        self.expand_row.grid(row=5, column=1, columnspan=2, sticky="ew", pady=(0, SPACING["sm"]))
         self.expand_row.columnconfigure(1, weight=1)
         self.expand_bias_label = ttk.Label(self.expand_row, text="Trim Bias", style="Form.TLabel")
         self.expand_bias_label.grid(row=0, column=0, sticky="w", padx=(0, SPACING["sm"]))

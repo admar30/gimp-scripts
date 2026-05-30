@@ -36,7 +36,7 @@ Current pass covers core run controls, preview integration, and expand-to-format
 - On next app launch, restore persisted target format, output settings, input-folder context, and window size/desktop location.
 9. Expand-to-format controls:
 - `Expand to Format` toggle in main form.
-- Hidden trim-bias slider row shown only when expand is enabled.
+- Hidden trim-bias slider shown inline on the same row as the expand toggle when expand is enabled.
 - Slider range `0..100`, default `50.0`.
 - If source has no excess trim axis (already ISO ratio), slider is disabled and shown as no-op.
 
@@ -66,9 +66,10 @@ Current layout in the implemented UI:
 - Inside row 4:
   - rounded output-directory field (expanding left section),
   - `Browse Output...` button (right section).
-5. Row 5: `Expand to Format` toggle row.
-6. Row 6: expand-bias slider row (hidden unless expand is enabled).
-7. Row 7: action row, spanning all 3 columns.
+5. Row 5: `Expand to Format` row:
+  - left: `Expand to Format` toggle,
+  - right: expand-bias slider cluster (hidden unless expand is enabled).
+6. Row 7: action row, spanning all 3 columns.
 - Inside row 7:
   - compact `Target Format` cluster at the left edge:
     - `Target Format` label,
@@ -77,7 +78,7 @@ Current layout in the implemented UI:
   - flexible spacer between target-format cluster and action buttons,
   - `Open Folder` button,
   - `Run` button on the far right.
-8. Row 8: status/output region, spanning all 3 columns and expanding vertically.
+7. Row 8: status/output region, spanning all 3 columns and expanding vertically.
 
 ### 4.3 Resize Behavior
 - The panel expands with the window.
