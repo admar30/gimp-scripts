@@ -17,6 +17,8 @@ from tkinter.scrolledtext import ScrolledText
 from PIL import Image, ImageOps, ImageTk
 
 from guidecut_runner import (
+    CUSTOM_GRID_MAX,
+    CUSTOM_GRID_MIN,
     SUPPORTED_FORMATS,
     browse_initial_directory,
     build_command,
@@ -28,14 +30,17 @@ from guidecut_runner import (
     load_ui_state,
     normalize_target_format,
     open_folder,
+    preset_grid_for_orientation,
     preview_guides_for_source,
     retained_input_value_after_run,
+    resolve_custom_grid,
     resolve_existing_input_file,
     resolve_open_folder,
     resolve_output_directory,
     run_command_streaming,
     sample_line_luminance,
     save_ui_state,
+    tooltip_text_for_custom_grid,
     tooltip_text_for_format,
 )
 from guidecut_theme import COLORS, FONTS, RADIUS, SPACING, apply_ttk_theme
@@ -440,6 +445,9 @@ class GuidecutApp(tk.Tk):
 
         self.input_var = tk.StringVar()
         self.target_var = tk.StringVar(value="A2")
+        self.custom_grid_var = tk.BooleanVar(value=False)
+        self.custom_cols_var = tk.StringVar(value="")
+        self.custom_rows_var = tk.StringVar(value="")
         self.specify_output_var = tk.BooleanVar(value=False)
         self.output_dir_var = tk.StringVar()
         self.show_preview_var = tk.BooleanVar(value=False)
@@ -468,6 +476,7 @@ class GuidecutApp(tk.Tk):
         self._preview_contrast_after_id: str | None = None
         self._cached_guide_style_key: tuple | None = None
         self._cached_guide_styles: list[tuple[str, str | None]] = []
+        self._custom_grid_initialized = False
         self._active_input_document: str | None = None
         self._expand_drag_active = False
         self._expand_drag_axis: str | None = None
@@ -483,8 +492,11 @@ class GuidecutApp(tk.Tk):
         self._build_ui()
         self.input_var.trace_add("write", self._on_input_path_changed)
         self.target_var.trace_add("write", self._on_target_changed)
+        self.custom_cols_var.trace_add("write", self._on_custom_grid_value_changed)
+        self.custom_rows_var.trace_add("write", self._on_custom_grid_value_changed)
         self._toggle_output_controls()
         self._toggle_expand_controls()
+        self._toggle_custom_grid_controls()
         self._sync_expand_document_state()
         self._sync_preview_controls()
         self._apply_persisted_window_geometry()
@@ -648,6 +660,68 @@ class GuidecutApp(tk.Tk):
         self.expand_bias_value.grid(row=0, column=2, sticky="e", padx=(SPACING["sm"], 0))
         self.expand_row.grid_remove()
 
+        self.custom_grid_toggle = ttk.Checkbutton(
+            panel,
+            text="Custom Grid",
+            variable=self.custom_grid_var,
+            command=self._on_custom_grid_toggle,
+        )
+        self.custom_grid_toggle.grid(row=6, column=0, sticky="w", pady=(0, SPACING["sm"]))
+
+        self.custom_grid_row = ttk.Frame(panel, style="Panel.TFrame")
+        self.custom_grid_row.grid(row=6, column=1, columnspan=2, sticky="ew", pady=(0, SPACING["sm"]))
+        self.custom_grid_row.columnconfigure(1, weight=1)
+        self.custom_grid_row.columnconfigure(3, weight=1)
+
+        ttk.Label(self.custom_grid_row, text="Cols", style="Form.TLabel").grid(
+            row=0,
+            column=0,
+            sticky="w",
+            padx=(0, SPACING["xs"]),
+        )
+        self.custom_cols_field = RoundedField(self.custom_grid_row, radius=RADIUS["sm"], fill=COLORS["bg.input"])
+        self.custom_cols_field.grid(row=0, column=1, sticky="ew")
+        self.custom_cols_entry = tk.Entry(
+            self.custom_cols_field.inner,
+            textvariable=self.custom_cols_var,
+            bg=COLORS["bg.input"],
+            fg=COLORS["text.primary"],
+            insertbackground=COLORS["text.primary"],
+            selectbackground=COLORS["action.secondary"],
+            selectforeground=COLORS["text.inverse"],
+            relief=tk.FLAT,
+            borderwidth=0,
+            highlightthickness=0,
+            font=FONTS["body"],
+        )
+        self.custom_cols_entry.pack(fill="x", expand=True, padx=SPACING["sm"], pady=SPACING["xs"])
+        self.custom_cols_field.bind_focus_widget(self.custom_cols_entry)
+
+        ttk.Label(self.custom_grid_row, text="Rows", style="Form.TLabel").grid(
+            row=0,
+            column=2,
+            sticky="w",
+            padx=(SPACING["sm"], SPACING["xs"]),
+        )
+        self.custom_rows_field = RoundedField(self.custom_grid_row, radius=RADIUS["sm"], fill=COLORS["bg.input"])
+        self.custom_rows_field.grid(row=0, column=3, sticky="ew")
+        self.custom_rows_entry = tk.Entry(
+            self.custom_rows_field.inner,
+            textvariable=self.custom_rows_var,
+            bg=COLORS["bg.input"],
+            fg=COLORS["text.primary"],
+            insertbackground=COLORS["text.primary"],
+            selectbackground=COLORS["action.secondary"],
+            selectforeground=COLORS["text.inverse"],
+            relief=tk.FLAT,
+            borderwidth=0,
+            highlightthickness=0,
+            font=FONTS["body"],
+        )
+        self.custom_rows_entry.pack(fill="x", expand=True, padx=SPACING["sm"], pady=SPACING["xs"])
+        self.custom_rows_field.bind_focus_widget(self.custom_rows_entry)
+        self.custom_grid_row.grid_remove()
+
         button_row = ttk.Frame(panel, style="Panel.TFrame")
         button_row.grid(row=7, column=0, columnspan=3, sticky="ew", pady=(0, SPACING["sm"]))
         button_row.columnconfigure(1, weight=1)
@@ -781,6 +855,11 @@ class GuidecutApp(tk.Tk):
         self.preview_panel.grid_remove()
 
     def _format_tooltip_text(self) -> str:
+        if self.custom_grid_var.get():
+            custom_grid = self._active_custom_grid_values(strict=False)
+            if custom_grid is None:
+                return tooltip_text_for_custom_grid(None, None)
+            return tooltip_text_for_custom_grid(custom_grid[0], custom_grid[1])
         try:
             return tooltip_text_for_format(self.target_var.get())
         except ValueError:
@@ -907,10 +986,19 @@ class GuidecutApp(tk.Tk):
         self._clear_preview_canvas()
 
     def _on_target_changed(self, *_args) -> None:
+        if not self.custom_grid_var.get():
+            self._custom_grid_initialized = False
         self.info_tooltip.refresh()
         if self.show_preview_var.get() and self._preview_source_image is not None:
             self._invalidate_guide_style_cache()
             self._render_preview(compute_contrast=True)
+
+    def _on_custom_grid_value_changed(self, *_args) -> None:
+        self.info_tooltip.refresh()
+        if self.custom_grid_var.get() and self.show_preview_var.get() and self._preview_source_image is not None:
+            self._invalidate_guide_style_cache()
+            self._render_preview(compute_contrast=False)
+            self._schedule_contrast_refresh()
 
     def _on_input_path_changed(self, *_args) -> None:
         self._sync_expand_document_state()
@@ -919,6 +1007,77 @@ class GuidecutApp(tk.Tk):
 
     def _on_preview_toggle(self) -> None:
         self._sync_preview_controls()
+
+    def _current_source_orientation(self) -> str | None:
+        file_path = resolve_existing_input_file(self.input_var.get())
+        if file_path is None:
+            return None
+
+        width_px: int | None = None
+        height_px: int | None = None
+        if self._preview_source_path == file_path and self._preview_source_image is not None:
+            width_px, height_px = self._preview_source_image.size
+        else:
+            try:
+                with Image.open(file_path) as image:
+                    width_px, height_px = image.size
+            except Exception:  # noqa: BLE001
+                return None
+        if width_px is None or height_px is None:
+            return None
+        if width_px > height_px:
+            return "landscape"
+        return "portrait"
+
+    def _initialize_custom_grid_from_target(self) -> None:
+        try:
+            target = normalize_target_format(self.target_var.get())
+        except ValueError:
+            target = "a2"
+        orientation = self._current_source_orientation() or "portrait"
+        cols, rows = preset_grid_for_orientation(target, orientation)
+        self.custom_cols_var.set(str(cols))
+        self.custom_rows_var.set(str(rows))
+        self._custom_grid_initialized = True
+
+    def _active_custom_grid_values(self, *, strict: bool) -> tuple[int, int] | None:
+        if not self.custom_grid_var.get():
+            return None
+        cols_text = self.custom_cols_var.get().strip()
+        rows_text = self.custom_rows_var.get().strip()
+        if not cols_text or not rows_text:
+            if strict:
+                raise ValueError(
+                    f"Custom grid requires both cols and rows ({CUSTOM_GRID_MIN}-{CUSTOM_GRID_MAX})."
+                )
+            return None
+        try:
+            return resolve_custom_grid(cols_text, rows_text)
+        except ValueError as exc:
+            if strict:
+                raise ValueError(str(exc)) from exc
+            return None
+
+    def _set_target_selector_enabled(self, enabled: bool) -> None:
+        state = tk.NORMAL if enabled else tk.DISABLED
+        self.target_menu_button.configure(state=state)
+
+    def _toggle_custom_grid_controls(self) -> None:
+        if self.custom_grid_var.get():
+            self.custom_grid_row.grid()
+        else:
+            self.custom_grid_row.grid_remove()
+        self._set_target_selector_enabled(not self.custom_grid_var.get())
+
+    def _on_custom_grid_toggle(self) -> None:
+        if self.custom_grid_var.get() and not self._custom_grid_initialized:
+            self._initialize_custom_grid_from_target()
+        self._toggle_custom_grid_controls()
+        self.info_tooltip.refresh()
+        if self._preview_panel_visible and self._preview_source_image is not None:
+            self._invalidate_guide_style_cache()
+            self._render_preview(compute_contrast=False)
+            self._schedule_contrast_refresh()
 
     def _on_expand_toggle(self) -> None:
         self._toggle_expand_controls()
@@ -1264,11 +1423,24 @@ class GuidecutApp(tk.Tk):
         self._last_preview_display_box = (offset_x, offset_y, display_w, display_h)
         self._last_preview_crop_info = crop_info
 
-        cols, rows, vertical_guides, horizontal_guides = preview_guides_for_source(
-            working_w,
-            working_h,
-            self.target_var.get(),
-        )
+        custom_grid = self._active_custom_grid_values(strict=False)
+        if self.custom_grid_var.get() and custom_grid is not None:
+            cols, rows, vertical_guides, horizontal_guides = preview_guides_for_source(
+                working_w,
+                working_h,
+                target_format=None,
+                custom_grid_cols=custom_grid[0],
+                custom_grid_rows=custom_grid[1],
+            )
+        elif self.custom_grid_var.get():
+            cols, rows = 1, 1
+            vertical_guides, horizontal_guides = [], []
+        else:
+            cols, rows, vertical_guides, horizontal_guides = preview_guides_for_source(
+                working_w,
+                working_h,
+                self.target_var.get(),
+            )
         ratio_x = display_w / working_w
         ratio_y = display_h / working_h
 
@@ -1291,6 +1463,8 @@ class GuidecutApp(tk.Tk):
         style_key = (
             str(self._preview_source_path or ""),
             self.target_var.get(),
+            bool(self.custom_grid_var.get()),
+            custom_grid,
             display_w,
             display_h,
             crop_info.rect.box if crop_info is not None else None,
@@ -1359,6 +1533,8 @@ class GuidecutApp(tk.Tk):
         )
         source_name = self._preview_source_path.name if self._preview_source_path is not None else "Preview"
         status_text = f"{source_name} ({working_w}x{working_h}px) | Grid {cols}x{rows}"
+        if self.custom_grid_var.get() and custom_grid is None:
+            status_text += f" | Custom grid requires cols/rows {CUSTOM_GRID_MIN}-{CUSTOM_GRID_MAX}"
         if self.expand_to_format_var.get() and crop_info is not None and crop_info.excess_px > 0:
             axis = "left/right" if crop_info.axis == "x" else "top/bottom"
             status_text += f" | Expanded trim {crop_info.excess_px}px ({axis})"
@@ -1488,8 +1664,10 @@ class GuidecutApp(tk.Tk):
     def _clear_validation(self) -> None:
         self.input_field.set_error(False)
         self.output_field.set_error(False)
+        self.custom_cols_field.set_error(False)
+        self.custom_rows_field.set_error(False)
 
-    def _resolve_run_inputs(self) -> tuple[Path, str, Path | None, bool, float]:
+    def _resolve_run_inputs(self) -> tuple[Path, str | None, Path | None, bool, float, int | None, int | None]:
         self._clear_validation()
 
         if not SCRIPT_PATH.exists():
@@ -1505,12 +1683,25 @@ class GuidecutApp(tk.Tk):
             self.input_field.set_error(True)
             raise ValueError(f"Input path does not exist or is not a file: {input_path}")
 
-        target = normalize_target_format(self.target_var.get())
+        target: str | None
+        custom_cols: int | None
+        custom_rows: int | None
+        if self.custom_grid_var.get():
+            target = None
+            try:
+                custom_cols, custom_rows = self._active_custom_grid_values(strict=True) or (None, None)
+            except ValueError as exc:
+                self.custom_cols_field.set_error(True)
+                self.custom_rows_field.set_error(True)
+                raise ValueError(str(exc)) from exc
+        else:
+            target = normalize_target_format(self.target_var.get())
+            custom_cols, custom_rows = None, None
         expand_enabled = bool(self.expand_to_format_var.get())
         expand_bias = clamp_expand_bias_percent(self.expand_bias_var.get(), default=EXPAND_DEFAULT_BIAS_PERCENT)
 
         if not self.specify_output_var.get():
-            return input_path, target, None, expand_enabled, expand_bias
+            return input_path, target, None, expand_enabled, expand_bias, custom_cols, custom_rows
 
         output_dir = resolve_output_directory(
             input_path=input_path,
@@ -1527,8 +1718,10 @@ class GuidecutApp(tk.Tk):
             input_path=input_path,
             target_format=target,
             output_dir=output_dir,
+            custom_grid_cols=custom_cols,
+            custom_grid_rows=custom_rows,
         )
-        return input_path, target, output_pdf, expand_enabled, expand_bias
+        return input_path, target, output_pdf, expand_enabled, expand_bias, custom_cols, custom_rows
 
     def _run(self) -> None:
         if self._run_thread and self._run_thread.is_alive():
@@ -1536,7 +1729,7 @@ class GuidecutApp(tk.Tk):
             return
 
         try:
-            input_path, target, output_path, expand_enabled, expand_bias = self._resolve_run_inputs()
+            input_path, target, output_path, expand_enabled, expand_bias, custom_cols, custom_rows = self._resolve_run_inputs()
         except ValueError as exc:
             self._append_status(str(exc), error=True)
             return
@@ -1549,12 +1742,18 @@ class GuidecutApp(tk.Tk):
             output_path=output_path,
             expand_to_format=expand_enabled,
             expand_bias_percent=expand_bias,
+            custom_grid_cols=custom_cols,
+            custom_grid_rows=custom_rows,
         )
         self._last_run_input_path = input_path
 
         display_command = " ".join(shlex.quote(part) for part in command)
         self._append_status("-" * 60)
         self._append_status(f"Running: {display_command}")
+        if custom_cols is not None and custom_rows is not None:
+            self._append_status(f"Custom grid mode: {custom_cols}x{custom_rows}")
+        elif target is not None:
+            self._append_status(f"Preset target mode: {target.upper()}")
         if output_path is not None:
             self._append_status(f"Explicit output path: {output_path}")
         if expand_enabled:

@@ -1,7 +1,7 @@
 ﻿# Guidecut Cut Preview Feature Spec
 
-Status: Draft v0.2  
-Date: 2026-05-30
+Status: Draft v0.3  
+Date: 2026-05-31
 
 ## 1. Purpose
 Add an in-app visual cut preview so users can verify tile boundaries before running Guidecut.
@@ -12,7 +12,9 @@ This feature adds a right-side preview panel and a `Show preview` toggle tied to
 ## 3. Functional Requirements
 1. When a document is selected, a `Show preview` toggle appears on the same row as `Specify output directory`, aligned to the right side.
 2. When `Show preview` is toggled on, a preview panel opens on the right side and displays the selected document.
-3. Guideline overlays in the preview reflect the currently selected target format (`A3|A2|A1|A0`).
+3. Guideline overlays in the preview reflect the active grid mode:
+- preset target format (`A3|A2|A1|A0`) or
+- custom `Cols x Rows`.
 4. The preview panel expands/shrinks with the app window.
 5. When `Show preview` is toggled off, the preview panel disappears.
 6. If `Show preview` becomes hidden because `Input File` no longer resolves to an existing file, the toggle must be automatically deselected.
@@ -69,6 +71,7 @@ This feature adds a right-side preview panel and a `Show preview` toggle tied to
   - `A1`: 8 tiles
   - `A0`: 16 tiles
 - Guide orientation must follow source orientation logic used by the tool (portrait vs landscape).
+- In custom mode, guide counts are taken directly from custom `Cols/Rows` values.
 - Overlay updates immediately when target format changes.
 - Guide color should be selected from a high-contrast palette using sampled pixels under/near each guide path.
 - If measured contrast is still weak, render a secondary outline/halo stroke behind the guide for legibility.

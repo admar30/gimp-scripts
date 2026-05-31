@@ -30,6 +30,8 @@ TARGET_SPLITS = {
 
 ISO216_ASPECT_RATIO = math.sqrt(2.0)
 DEFAULT_EXPAND_BIAS_PERCENT = 50.0
+CUSTOM_GRID_MIN = 1
+CUSTOM_GRID_MAX = 32
 
 
 @dataclass(frozen=True)
@@ -54,12 +56,84 @@ class ExpandCrop:
     bias_percent: float
 
 
+@dataclass(frozen=True)
+class GridSelection:
+    mode: str
+    target: str | None
+    cols: int | None
+    rows: int | None
+    output_token: str
+
+
 def parse_target_format(value: str) -> str:
     normalized = value.strip().lower()
     if normalized not in TARGET_SPLITS:
         allowed = ", ".join(sorted(TARGET_SPLITS))
         raise ValueError(f"Unsupported target format '{value}'. Use one of: {allowed}.")
     return normalized
+
+
+def build_custom_grid_token(cols: int, rows: int) -> str:
+    return f"grid-{cols}x{rows}"
+
+
+def _parse_custom_grid_dimension(value: int | None, field_name: str) -> int:
+    if value is None:
+        raise ValueError(f"Missing required value for --{field_name}.")
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"--{field_name} must be an integer.") from exc
+    if not (CUSTOM_GRID_MIN <= parsed <= CUSTOM_GRID_MAX):
+        raise ValueError(
+            f"--{field_name} must be between {CUSTOM_GRID_MIN} and {CUSTOM_GRID_MAX} (got {parsed})."
+        )
+    return parsed
+
+
+def resolve_grid_selection(
+    target_format_value: str | None,
+    grid_cols_value: int | None,
+    grid_rows_value: int | None,
+) -> GridSelection:
+    target_text = (target_format_value or "").strip()
+    has_target = bool(target_text)
+    has_cols = grid_cols_value is not None
+    has_rows = grid_rows_value is not None
+
+    if has_target and (has_cols or has_rows):
+        raise ValueError(
+            "Preset target format and custom grid options are mutually exclusive. "
+            "Choose either <target_format> or --grid-cols/--grid-rows."
+        )
+
+    if has_target:
+        target = parse_target_format(target_text)
+        return GridSelection(
+            mode="preset",
+            target=target,
+            cols=None,
+            rows=None,
+            output_token=target,
+        )
+
+    if has_cols != has_rows:
+        raise ValueError("Custom grid mode requires both --grid-cols and --grid-rows.")
+    if has_cols and has_rows:
+        cols = _parse_custom_grid_dimension(grid_cols_value, "grid-cols")
+        rows = _parse_custom_grid_dimension(grid_rows_value, "grid-rows")
+        return GridSelection(
+            mode="custom",
+            target=None,
+            cols=cols,
+            rows=rows,
+            output_token=build_custom_grid_token(cols, rows),
+        )
+
+    raise ValueError(
+        "No grid mode selected. Provide either <target_format> "
+        "or both --grid-cols and --grid-rows."
+    )
 
 
 def detect_orientation(width_px: int, height_px: int) -> str:
@@ -237,17 +311,17 @@ def compute_expand_crop_rect(width_px: int, height_px: int, bias_percent: float 
     )
 
 
-def build_output_path(input_path: Path, target: str, now_local: datetime | None = None) -> Path:
+def build_output_path(input_path: Path, target_token: str, now_local: datetime | None = None) -> Path:
     now_local = now_local or datetime.now().astimezone()
     timestamp = now_local.strftime("%Y%m%d-%H%M%S")
     stem = input_path.stem
-    base = input_path.with_name(f"{stem}-guidecut-{target}-{timestamp}.pdf")
+    base = input_path.with_name(f"{stem}-guidecut-{target_token}-{timestamp}.pdf")
     if not base.exists():
         return base
 
     suffix = 1
     while True:
-        candidate = input_path.with_name(f"{stem}-guidecut-{target}-{timestamp}-{suffix}.pdf")
+        candidate = input_path.with_name(f"{stem}-guidecut-{target_token}-{timestamp}-{suffix}.pdf")
         if not candidate.exists():
             return candidate
         suffix += 1
@@ -376,7 +450,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         )
     )
     parser.add_argument("input_path", type=Path, help="Path to source file.")
-    parser.add_argument("target_format", help="One of: a3, a2, a1, a0.")
+    parser.add_argument(
+        "target_format",
+        nargs="?",
+        help="Optional preset target format: one of a3, a2, a1, a0.",
+    )
     parser.add_argument(
         "--output",
         type=Path,
@@ -402,6 +480,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "100 keeps right/bottom content."
         ),
     )
+    parser.add_argument(
+        "--grid-cols",
+        type=int,
+        default=None,
+        help=f"Custom grid columns ({CUSTOM_GRID_MIN}..{CUSTOM_GRID_MAX}). Requires --grid-rows.",
+    )
+    parser.add_argument(
+        "--grid-rows",
+        type=int,
+        default=None,
+        help=f"Custom grid rows ({CUSTOM_GRID_MIN}..{CUSTOM_GRID_MAX}). Requires --grid-cols.",
+    )
     return parser
 
 
@@ -410,7 +500,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     input_path = args.input_path.expanduser().resolve()
 
     try:
-        target = parse_target_format(args.target_format)
+        grid_selection = resolve_grid_selection(
+            args.target_format,
+            args.grid_cols,
+            args.grid_rows,
+        )
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 2
@@ -425,7 +519,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"Input path does not exist or is not a file: {input_path}", file=sys.stderr)
         return 2
 
-    output_path = args.output.expanduser().resolve() if args.output else build_output_path(input_path, target)
+    output_path = (
+        args.output.expanduser().resolve()
+        if args.output
+        else build_output_path(input_path, grid_selection.output_token)
+    )
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     try:
@@ -452,7 +550,12 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         width_px, height_px = working_image.size
         orientation = detect_orientation(width_px, height_px)
-        cols, rows = compute_grid(target, orientation)
+        if grid_selection.mode == "preset":
+            assert grid_selection.target is not None
+            cols, rows = compute_grid(grid_selection.target, orientation)
+        else:
+            assert grid_selection.cols is not None and grid_selection.rows is not None
+            cols, rows = grid_selection.cols, grid_selection.rows
         v_guides, h_guides = compute_guides(width_px, height_px, cols, rows)
 
         if not args.expand_to_format and not is_near_iso216_ratio(width_px, height_px):
@@ -485,7 +588,10 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if not args.quiet:
         print(f"Input: {input_path}")
-        print(f"Target format: {target}")
+        if grid_selection.mode == "preset":
+            print(f"Target format: {grid_selection.target}")
+        else:
+            print(f"Target format: custom grid ({grid_selection.cols}x{grid_selection.rows})")
         if args.expand_to_format:
             if crop_info is None:
                 print(f"Expand to format: enabled (bias={expand_bias_percent:.2f}%)")

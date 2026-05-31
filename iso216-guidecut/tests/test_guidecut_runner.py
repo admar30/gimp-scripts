@@ -17,6 +17,8 @@ for _module_dir in (APP_DIR, CLI_DIR):
         sys.path.insert(0, _path_text)
 
 from guidecut_runner import (
+    CUSTOM_GRID_MAX,
+    CUSTOM_GRID_MIN,
     DEFAULT_UI_STATE,
     browse_initial_directory,
     build_command,
@@ -46,7 +48,10 @@ from guidecut_runner import (
     sanitize_expand_bias_percent,
     sanitize_ui_state,
     persisted_input_directory,
+    preset_grid_for_orientation,
+    resolve_custom_grid,
     sanitize_window_geometry,
+    tooltip_text_for_custom_grid,
     tooltip_text_for_format,
 )
 
@@ -71,6 +76,18 @@ def test_tooltip_text_for_format(target: str, tiles: str, multiple: str) -> None
     assert target.upper() in text
     assert f"Tiles/pages: {tiles}" in text
     assert f"Sheet size: {multiple}" in text
+
+
+def test_tooltip_text_for_custom_grid() -> None:
+    text = tooltip_text_for_custom_grid(3, 4)
+    assert "Custom Grid" in text
+    assert "Grid: 3x4" in text
+    assert "Tiles/pages: 12" in text
+
+
+def test_tooltip_text_for_custom_grid_invalid() -> None:
+    text = tooltip_text_for_custom_grid(None, None)
+    assert f"{CUSTOM_GRID_MIN}-{CUSTOM_GRID_MAX}" in text
 
 
 def test_resolve_output_directory_explicit() -> None:
@@ -175,6 +192,33 @@ def test_preview_guides_for_source_uses_orientation_and_target_grid() -> None:
     assert rows == 2
     assert vertical == []
     assert horizontal == [500]
+
+
+def test_preview_guides_for_source_with_custom_grid() -> None:
+    cols, rows, vertical, horizontal = preview_guides_for_source(
+        1200,
+        600,
+        target_format=None,
+        custom_grid_cols=3,
+        custom_grid_rows=2,
+    )
+    assert cols == 3
+    assert rows == 2
+    assert vertical == [400, 800]
+    assert horizontal == [300]
+
+
+def test_resolve_custom_grid() -> None:
+    assert resolve_custom_grid("3", "4") == (3, 4)
+    with pytest.raises(ValueError):
+        resolve_custom_grid("0", "4")
+    with pytest.raises(ValueError):
+        resolve_custom_grid("3", "")
+
+
+def test_preset_grid_for_orientation() -> None:
+    assert preset_grid_for_orientation("A3", "portrait") == (1, 2)
+    assert preset_grid_for_orientation("A3", "landscape") == (2, 1)
 
 
 def test_browse_initial_directory_none_for_empty_or_non_existing() -> None:
@@ -391,6 +435,23 @@ def test_build_output_pdf_path_uses_timestamp_and_collision_suffix(monkeypatch: 
     assert second.name == "poster-guidecut-a2-20260321-172000-1.pdf"
 
 
+def test_build_output_pdf_path_custom_grid_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    input_path = Path("C:/input/poster.png")
+    output_dir = Path("C:/out")
+    now = dt.datetime(2026, 3, 21, 17, 20, 0, tzinfo=dt.timezone.utc)
+
+    monkeypatch.setattr(Path, "exists", lambda _self: False, raising=False)
+    output = build_output_pdf_path(
+        input_path,
+        target_format=None,
+        output_dir=output_dir,
+        custom_grid_cols=3,
+        custom_grid_rows=4,
+        now_local=now,
+    )
+    assert output.name == "poster-guidecut-grid-3x4-20260321-172000.pdf"
+
+
 def test_build_command_without_output() -> None:
     command = build_command(
         python_executable="python",
@@ -400,6 +461,27 @@ def test_build_command_without_output() -> None:
         output_path=None,
     )
     assert command == ["python", "iso216_guidecut.py", "C:\\in\\file.avif", "a3"]
+
+
+def test_build_command_custom_grid_mode() -> None:
+    command = build_command(
+        python_executable="python",
+        script_path=Path("iso216_guidecut.py"),
+        input_path=Path("C:/in/file.avif"),
+        target_format=None,
+        custom_grid_cols=3,
+        custom_grid_rows=4,
+        output_path=None,
+    )
+    assert command == [
+        "python",
+        "iso216_guidecut.py",
+        "C:\\in\\file.avif",
+        "--grid-cols",
+        "3",
+        "--grid-rows",
+        "4",
+    ]
 
 
 def test_build_command_with_output() -> None:
@@ -459,6 +541,18 @@ def test_build_command_without_expand_args_when_disabled() -> None:
     )
     assert "--expand-to-format" not in command
     assert "--expand-bias-percent" not in command
+
+
+def test_build_command_rejects_preset_custom_conflict() -> None:
+    with pytest.raises(ValueError):
+        build_command(
+            python_executable="python",
+            script_path=Path("iso216_guidecut.py"),
+            input_path=Path("C:/in/file.avif"),
+            target_format="A2",
+            custom_grid_cols=2,
+            custom_grid_rows=2,
+        )
 
 
 def test_resolve_open_folder_prefers_explicit_output_dir() -> None:

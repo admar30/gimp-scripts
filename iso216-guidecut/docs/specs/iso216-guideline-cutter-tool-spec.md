@@ -1,7 +1,7 @@
 # ISO216 Guideline Cutter Tool Specification
 
-Status: Draft v1.1  
-Date: 2026-05-30
+Status: Draft v1.2  
+Date: 2026-05-31
 
 ## 1. Purpose
 This tool takes an input document/image and a target ISO216 format (`a3`, `a2`, `a1`, or `a0`), computes guide positions that represent bisection cut lines, and exports all tiles into a single multi-page PDF intended for A4 printing and physical assembly.
@@ -20,12 +20,19 @@ The source file may have non-standard internal dimensions. The tool does not rej
 ## 3. CLI Contract
 ### 3.1 Required Parameters
 1. `input_path`
-2. `target_format`
+2. Exactly one grid mode:
+- preset mode via `target_format`
+- custom mode via `--grid-cols` + `--grid-rows`
 
-### 3.2 `target_format` Rules
+### 3.2 Preset `target_format` Rules
 - Accepted values: `a3`, `a2`, `a1`, `a0`
 - Case-insensitive input is allowed (`A2` accepted, normalized to `a2`)
 - Any other value must fail with a clear error message and non-zero exit code
+
+### 3.2.1 Custom Grid Rules
+- `--grid-cols` and `--grid-rows` are required together.
+- Allowed integer range per dimension: `1..32`.
+- Preset and custom modes are mutually exclusive.
 
 ### 3.3 Optional Expand-to-Format Parameters
 - `--expand-to-format` (boolean flag)
@@ -50,7 +57,9 @@ Behavior:
 1. Load source file via the selected image backend (default: Pillow).
 2. If expand mode is enabled, compute and apply pre-crop rectangle to enforce ISO216 ratio.
 3. Detect orientation from working dimensions (cropped dimensions when expand is enabled).
-4. Compute bisection grid from `target_format` and orientation.
+4. Resolve grid:
+- preset mode: compute bisection grid from `target_format` and orientation.
+- custom mode: use explicit `cols x rows`.
 5. Compute vertical/horizontal guide positions at cut lines.
 6. Generate tile crop rectangles from the guide grid.
 7. Export all tiles into one multi-page PDF with deterministic page ordering.
@@ -109,9 +118,15 @@ Guide positions:
 - Horizontal guide `j` at `y = round(j * height_px / rows)`, `j = 1..rows-1`
 
 ### 4.4 Output Naming and Location
-Create one output PDF beside the input file:
+Create one output PDF beside the input file.
+
+Preset naming:
 
 `<input-stem>-guidecut-<target-format>-<YYYYMMDD-HHMMSS>.pdf`
+
+Custom naming:
+
+`<input-stem>-guidecut-grid-<cols>x<rows>-<YYYYMMDD-HHMMSS>.pdf`
 
 Requirements:
 - Datetime uses local system timezone.
@@ -135,6 +150,9 @@ Example for `a2` (2x2) page sequence:
 Hard failures (non-zero exit):
 - Input path does not exist or is unreadable.
 - Unsupported target format.
+- Neither grid mode selected.
+- Conflicting grid mode inputs (preset + custom together).
+- Invalid custom-grid dimensions.
 - Invalid `--expand-bias-percent` value (outside `[0,100]` or non-numeric).
 - Output file path cannot be created/written.
 - Export failure for any page or final combined PDF write.
@@ -153,8 +171,9 @@ Soft warnings (continue):
 7. `clamp_expand_bias_percent(value: float|int, default=50.0) -> float`
 8. `parse_expand_bias_percent(value) -> float`
 9. `compute_expand_crop_rect(width_px: int, height_px: int, bias_percent: float|int) -> ExpandCrop`
-10. `build_output_path(input_path: str, target: str, now_local: datetime) -> output_pdf_path`
-11. `export_tiles_to_multipage_pdf(image, ordered_rects, output_path, preserve_profile=True, preserve_metadata=True) -> None`
+10. `resolve_grid_selection(target_format, grid_cols, grid_rows) -> GridSelection`
+11. `build_output_path(input_path: str, target_token: str, now_local: datetime) -> output_pdf_path`
+12. `export_tiles_to_multipage_pdf(image, ordered_rects, output_path, preserve_profile=True, preserve_metadata=True) -> None`
 
 ## 7. Non-Functional Requirements
 - Deterministic output naming and page ordering.
@@ -171,6 +190,7 @@ Soft warnings (continue):
 6. Color profile and metadata are preserved when supported; warnings are logged otherwise.
 7. When expand mode is enabled, crop occurs before guide/grid computation and output geometry reflects cropped dimensions.
 8. Expand bias endpoints are correct (`0%` left/top anchored, `100%` right/bottom anchored).
+9. Custom grid mode produces exactly `cols*rows` pages and guide counts (`cols-1`, `rows-1`).
 
 ## 9. Test Plan
 ### 9.1 Unit Tests
@@ -183,6 +203,8 @@ Soft warnings (continue):
 - Expand crop rectangle math for too-wide/too-tall sources
 - Expand bias endpoint and clamping behavior (`0`, `50`, `100`)
 - Expand no-op behavior for already ISO-ratio sources
+- Custom grid mode selection/validation and conflict handling
+- Custom output token naming (`grid-CxR`)
 
 ### 9.2 Integration Tests
 - One fixture each for `a3`, `a2`, `a1`, `a0`

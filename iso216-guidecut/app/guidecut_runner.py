@@ -21,12 +21,16 @@ if str(CLI_DIR) not in sys.path:
     sys.path.insert(0, str(CLI_DIR))
 
 from iso216_guidecut import (
+    CUSTOM_GRID_MAX,
+    CUSTOM_GRID_MIN,
+    build_custom_grid_token,
     clamp_expand_bias_percent as cli_clamp_expand_bias_percent,
     compute_expand_crop_rect,
     compute_grid,
     compute_guides,
     detect_orientation,
     parse_target_format,
+    resolve_grid_selection,
 )
 
 
@@ -211,6 +215,25 @@ def tooltip_text_for_format(value: str) -> str:
     )
 
 
+def tooltip_text_for_custom_grid(cols: int | None, rows: int | None) -> str:
+    try:
+        grid_selection = resolve_grid_selection(
+            target_format_value=None,
+            grid_cols_value=cols,
+            grid_rows_value=rows,
+        )
+    except ValueError:
+        return f"Custom Grid\nEnter cols/rows ({CUSTOM_GRID_MIN}-{CUSTOM_GRID_MAX})"
+
+    assert grid_selection.cols is not None and grid_selection.rows is not None
+    tile_count = grid_selection.cols * grid_selection.rows
+    return (
+        "Custom Grid\n"
+        f"Grid: {grid_selection.cols}x{grid_selection.rows}\n"
+        f"Tiles/pages: {tile_count}"
+    )
+
+
 def resolve_output_directory(input_path: Path, explicit_enabled: bool, explicit_dir_value: str) -> Path:
     if explicit_enabled and explicit_dir_value.strip():
         return Path(explicit_dir_value.strip()).expanduser().resolve()
@@ -219,22 +242,29 @@ def resolve_output_directory(input_path: Path, explicit_enabled: bool, explicit_
 
 def build_output_pdf_path(
     input_path: Path,
-    target_format: str,
+    target_format: str | None,
     output_dir: Path,
+    custom_grid_cols: int | None = None,
+    custom_grid_rows: int | None = None,
     now_local: datetime | None = None,
 ) -> Path:
-    target = normalize_target_format(target_format)
+    grid_selection = resolve_grid_selection(
+        target_format_value=target_format,
+        grid_cols_value=custom_grid_cols,
+        grid_rows_value=custom_grid_rows,
+    )
+    output_token = grid_selection.output_token
     now_local = now_local or datetime.now().astimezone()
     timestamp = now_local.strftime("%Y%m%d-%H%M%S")
     stem = input_path.stem
 
-    base = output_dir / f"{stem}-guidecut-{target}-{timestamp}.pdf"
+    base = output_dir / f"{stem}-guidecut-{output_token}-{timestamp}.pdf"
     if not base.exists():
         return base
 
     suffix = 1
     while True:
-        candidate = output_dir / f"{stem}-guidecut-{target}-{timestamp}-{suffix}.pdf"
+        candidate = output_dir / f"{stem}-guidecut-{output_token}-{timestamp}-{suffix}.pdf"
         if not candidate.exists():
             return candidate
         suffix += 1
@@ -244,18 +274,29 @@ def build_command(
     python_executable: str,
     script_path: Path,
     input_path: Path,
-    target_format: str,
+    target_format: str | None = None,
     output_path: Path | None = None,
     expand_to_format: bool = False,
     expand_bias_percent: float | int = 50.0,
+    custom_grid_cols: int | None = None,
+    custom_grid_rows: int | None = None,
 ) -> list[str]:
-    target = normalize_target_format(target_format)
+    grid_selection = resolve_grid_selection(
+        target_format_value=target_format,
+        grid_cols_value=custom_grid_cols,
+        grid_rows_value=custom_grid_rows,
+    )
     command = [
         python_executable,
         str(script_path),
         str(input_path),
-        target,
     ]
+    if grid_selection.mode == "preset":
+        assert grid_selection.target is not None
+        command.append(grid_selection.target)
+    else:
+        assert grid_selection.cols is not None and grid_selection.rows is not None
+        command.extend(["--grid-cols", str(grid_selection.cols), "--grid-rows", str(grid_selection.rows)])
     if output_path is not None:
         command.extend(["--output", str(output_path)])
     if expand_to_format:
@@ -315,13 +356,61 @@ def effective_preview_state(input_path_value: str, show_preview_requested: bool)
 def preview_guides_for_source(
     width_px: int,
     height_px: int,
-    target_format: str,
+    target_format: str | None = None,
+    custom_grid_cols: int | None = None,
+    custom_grid_rows: int | None = None,
 ) -> tuple[int, int, list[int], list[int]]:
-    target = normalize_target_format(target_format)
-    orientation = detect_orientation(width_px, height_px)
-    cols, rows = compute_grid(target, orientation)
+    if custom_grid_cols is not None or custom_grid_rows is not None:
+        grid_selection = resolve_grid_selection(
+            target_format_value=None,
+            grid_cols_value=custom_grid_cols,
+            grid_rows_value=custom_grid_rows,
+        )
+        assert grid_selection.cols is not None and grid_selection.rows is not None
+        cols, rows = grid_selection.cols, grid_selection.rows
+    else:
+        grid_selection = resolve_grid_selection(
+            target_format_value=target_format,
+            grid_cols_value=None,
+            grid_rows_value=None,
+        )
+        assert grid_selection.target is not None
+        orientation = detect_orientation(width_px, height_px)
+        cols, rows = compute_grid(grid_selection.target, orientation)
     vertical, horizontal = compute_guides(width_px, height_px, cols, rows)
     return cols, rows, vertical, horizontal
+
+
+def resolve_custom_grid(custom_grid_cols: int | str | None, custom_grid_rows: int | str | None) -> tuple[int, int]:
+    parsed_cols: int | None
+    parsed_rows: int | None
+    try:
+        parsed_cols = None if custom_grid_cols is None else int(custom_grid_cols)
+    except (TypeError, ValueError):
+        parsed_cols = None
+    try:
+        parsed_rows = None if custom_grid_rows is None else int(custom_grid_rows)
+    except (TypeError, ValueError):
+        parsed_rows = None
+
+    grid_selection = resolve_grid_selection(
+        target_format_value=None,
+        grid_cols_value=parsed_cols,
+        grid_rows_value=parsed_rows,
+    )
+    assert grid_selection.cols is not None and grid_selection.rows is not None
+    return grid_selection.cols, grid_selection.rows
+
+
+def preset_grid_for_orientation(target_format: str, orientation: str = "portrait") -> tuple[int, int]:
+    target = normalize_target_format(target_format)
+    axis_orientation = "landscape" if orientation == "landscape" else "portrait"
+    return compute_grid(target, axis_orientation)
+
+
+def custom_grid_token(custom_grid_cols: int, custom_grid_rows: int) -> str:
+    cols, rows = resolve_custom_grid(custom_grid_cols, custom_grid_rows)
+    return build_custom_grid_token(cols, rows)
 
 
 def clamp_expand_bias_percent(value, default: float | int = 50.0) -> float:  # noqa: ANN001

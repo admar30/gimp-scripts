@@ -1,7 +1,7 @@
 # Guidecut UI Specification
 
-Status: Draft v0.8  
-Date: 2026-05-30
+Status: Draft v0.9  
+Date: 2026-05-31
 
 ## 1. Purpose
 Design a simple desktop UI for running `iso216_guidecut.py` without requiring terminal use.
@@ -14,6 +14,11 @@ Current pass covers core run controls, preview integration, and expand-to-format
 - Supports file navigation/browse dialog.
 2. Target format dropdown:
 - Lists supported values as uppercase display labels: `A3`, `A2`, `A1`, `A0`.
+2.1 Custom grid controls:
+- `Custom Grid` toggle.
+- `Cols` and `Rows` numeric inputs shown only when custom mode is enabled.
+- Allowed range per value: `1..32`.
+- Preset selector is disabled while custom mode is enabled.
 3. Run button:
 - Executes the script using selected file path + selected format.
 4. Optional output directory controls:
@@ -39,6 +44,10 @@ Current pass covers core run controls, preview integration, and expand-to-format
 - Hidden trim-bias slider shown inline on the same row as the expand toggle when expand is enabled.
 - Slider range `0..100`, default `50.0`.
 - If source has no excess trim axis (already ISO ratio), slider is disabled and shown as no-op.
+10. Custom-grid mode behavior:
+- First time custom mode is enabled in a session, initialize `Cols/Rows` from current preset grid.
+- Keep current custom values after run completion.
+- Do not persist custom mode/values across app restart.
 
 ## 3. Non-Goals (Initial Pass)
 - Batch mode (multiple files).
@@ -69,7 +78,10 @@ Current layout in the implemented UI:
 5. Row 5: `Expand to Format` row:
   - left: `Expand to Format` toggle,
   - right: expand-bias slider cluster (hidden unless expand is enabled).
-6. Row 7: action row, spanning all 3 columns.
+6. Row 6: `Custom Grid` row:
+  - left: `Custom Grid` toggle,
+  - right: `Cols` / `Rows` fields (hidden unless custom mode is enabled).
+7. Row 7: action row, spanning all 3 columns.
 - Inside row 7:
   - compact `Target Format` cluster at the left edge:
     - `Target Format` label,
@@ -78,7 +90,7 @@ Current layout in the implemented UI:
   - flexible spacer between target-format cluster and action buttons,
   - `Open Folder` button,
   - `Run` button on the far right.
-7. Row 8: status/output region, spanning all 3 columns and expanding vertically.
+8. Row 8: status/output region, spanning all 3 columns and expanding vertically.
 
 ### 4.3 Resize Behavior
 - The panel expands with the window.
@@ -119,6 +131,7 @@ Current layout in the implemented UI:
   - `A1`: `8` tiles/pages, sheet area is `8x A4`.
   - `A0`: `16` tiles/pages, sheet area is `16x A4`.
 - Tooltip content must update immediately when format selection changes.
+- When `Custom Grid` is enabled, dropdown is disabled.
 
 ### 5.4 Run Button
 - Enabled only when validation passes, or alternatively always enabled with validation on click.
@@ -129,6 +142,14 @@ Current layout in the implemented UI:
 - While command is running:
   - Disable `Run`.
   - Re-enable when process exits.
+
+### 5.4.1 Grid Mode Validation
+- Exactly one grid mode must be active for run:
+  - Preset mode: target format selected.
+  - Custom mode: valid `Cols` and `Rows` values.
+- In custom mode:
+  - both `Cols` and `Rows` are required,
+  - values must be integers in `1..32`.
 
 ### 5.5 Output Directory Toggle + Hidden Field
 - Toggle default state: off.
@@ -181,6 +202,7 @@ Current layout in the implemented UI:
 - Window geometry (`width x height + x + y`) for size and desktop position
 - Restore these values on startup.
 - Do not persist input filename.
+- Do not persist custom-grid toggle or custom cols/rows values.
 - If persisted data is missing/invalid:
   - fall back to defaults (`A2`, toggle off, empty output directory, empty input-folder context, platform default window placement/size).
 
@@ -219,6 +241,12 @@ With expand mode enabled:
 python iso216_guidecut.py "<input_path>" "<target_format>" --expand-to-format --expand-bias-percent "<0..100>"
 ```
 
+With custom-grid mode enabled:
+
+```powershell
+python iso216_guidecut.py "<input_path>" --grid-cols "<1..32>" --grid-rows "<1..32>"
+```
+
 Execution details:
 - Working directory: `iso216-guidecut` folder.
 - Must preserve quoted file paths to support spaces.
@@ -227,6 +255,7 @@ Execution details:
   - `<output_dir>\<input-stem>-guidecut-<target-format>-<YYYYMMDD-HHMMSS>.pdf`
 - If explicit output-directory field is empty, do not pass `--output`; use script default location (source file directory).
 - Pass expand args only when expand toggle is enabled.
+- Pass either preset target argument or custom grid args, never both.
 - Exit code handling:
   - `0`: success message with generated output path.
   - non-zero: error message with stderr content.

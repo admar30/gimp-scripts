@@ -16,7 +16,10 @@ if CLI_PATH not in sys.path:
 
 import iso216_guidecut as guidecut_module
 from iso216_guidecut import (
+    CUSTOM_GRID_MAX,
+    CUSTOM_GRID_MIN,
     build_output_path,
+    build_custom_grid_token,
     clamp_expand_bias_percent,
     compute_expand_crop_rect,
     compute_grid,
@@ -28,6 +31,7 @@ from iso216_guidecut import (
     parse_expand_bias_percent,
     ordered_tiles,
     parse_target_format,
+    resolve_grid_selection,
 )
 
 
@@ -39,6 +43,44 @@ def test_parse_target_format_case_insensitive() -> None:
 def test_parse_target_format_rejects_invalid() -> None:
     with pytest.raises(ValueError):
         parse_target_format("a5")
+
+
+def test_build_custom_grid_token() -> None:
+    assert build_custom_grid_token(3, 4) == "grid-3x4"
+
+
+def test_resolve_grid_selection_for_preset_mode() -> None:
+    selection = resolve_grid_selection("A2", None, None)
+    assert selection.mode == "preset"
+    assert selection.target == "a2"
+    assert selection.cols is None
+    assert selection.rows is None
+    assert selection.output_token == "a2"
+
+
+def test_resolve_grid_selection_for_custom_mode() -> None:
+    selection = resolve_grid_selection(None, 3, 4)
+    assert selection.mode == "custom"
+    assert selection.target is None
+    assert selection.cols == 3
+    assert selection.rows == 4
+    assert selection.output_token == "grid-3x4"
+
+
+def test_resolve_grid_selection_rejects_conflicts_or_missing() -> None:
+    with pytest.raises(ValueError):
+        resolve_grid_selection("a2", 3, 4)
+    with pytest.raises(ValueError):
+        resolve_grid_selection(None, 3, None)
+    with pytest.raises(ValueError):
+        resolve_grid_selection(None, None, None)
+
+
+def test_resolve_grid_selection_rejects_out_of_range_custom_dims() -> None:
+    with pytest.raises(ValueError):
+        resolve_grid_selection(None, CUSTOM_GRID_MIN - 1, 2)
+    with pytest.raises(ValueError):
+        resolve_grid_selection(None, 2, CUSTOM_GRID_MAX + 1)
 
 
 @pytest.mark.parametrize(
@@ -252,3 +294,59 @@ def test_main_expand_on_uses_cropped_geometry(monkeypatch: pytest.MonkeyPatch, t
     assert rects[-1].x1 == expected_width
     assert captured["preserve_profile"] is True
     assert captured["preserve_metadata"] is True
+
+
+def test_main_custom_grid_mode_uses_explicit_dimensions(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    input_path = tmp_path / "wide.png"
+    output_path = tmp_path / "out.pdf"
+    Image.new("RGB", (1200, 500), "white").save(input_path)
+
+    captured: dict[str, object] = {}
+
+    def fake_compute_grid(_target: str, _orientation: str) -> tuple[int, int]:
+        raise AssertionError("compute_grid should not be called in custom grid mode.")
+
+    def fake_export(
+        image,  # noqa: ANN001
+        ordered_rects,  # noqa: ANN001
+        output_path: Path,  # noqa: ARG001
+        preserve_profile: bool = True,  # noqa: FBT001, FBT002
+        preserve_metadata: bool = True,  # noqa: FBT001, FBT002
+    ) -> list[str]:
+        captured["size"] = image.size
+        captured["rects"] = list(ordered_rects)
+        return []
+
+    monkeypatch.setattr(guidecut_module, "compute_grid", fake_compute_grid)
+    monkeypatch.setattr(guidecut_module, "export_tiles_to_multipage_pdf", fake_export)
+
+    exit_code = main(
+        [
+            str(input_path),
+            "--grid-cols",
+            "3",
+            "--grid-rows",
+            "2",
+            "--output",
+            str(output_path),
+            "--quiet",
+        ]
+    )
+    assert exit_code == 0
+    assert captured["size"] == (1200, 500)
+    rects = captured["rects"]
+    assert len(rects) == 6
+    assert rects[-1].box == (800, 250, 1200, 500)
+
+
+def test_main_rejects_conflicting_or_missing_grid_mode(tmp_path: Path) -> None:
+    input_path = tmp_path / "wide.png"
+    Image.new("RGB", (1200, 500), "white").save(input_path)
+
+    conflict = main([str(input_path), "a2", "--grid-cols", "2", "--grid-rows", "2", "--quiet"])
+    missing = main([str(input_path), "--quiet"])
+    partial = main([str(input_path), "--grid-cols", "2", "--quiet"])
+
+    assert conflict == 2
+    assert missing == 2
+    assert partial == 2
