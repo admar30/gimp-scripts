@@ -77,3 +77,35 @@ test("stacks the preview below controls on a mobile viewport", async ({ page }) 
   const previewBox = await preview.boundingBox();
   expect(previewBox!.y).toBeGreaterThanOrEqual(controlBox!.y + controlBox!.height - 2);
 });
+
+test("keeps preview dimensions stable after loading an image", async ({ page }) => {
+  await page.goto("/gimp-scripts/");
+  await page.locator('input[type="file"]').setInputFiles({
+    name: "stable-preview.png",
+    mimeType: "image/png",
+    buffer: Buffer.from(PNG_BASE64, "base64"),
+  });
+  await expect(page.getByLabel("Cut preview")).toBeVisible();
+
+  const dimensions: Array<{ page: number; host: number; canvas: number }> = [];
+  for (let sample = 0; sample < 4; sample += 1) {
+    dimensions.push(await page.evaluate(() => {
+      const host = document.querySelector<HTMLElement>(".preview-canvas-host");
+      const canvas = document.querySelector<HTMLCanvasElement>(".preview-canvas");
+      if (!host || !canvas) throw new Error("Preview elements are missing.");
+      return {
+        page: document.documentElement.scrollHeight,
+        host: host.getBoundingClientRect().height,
+        canvas: canvas.getBoundingClientRect().height,
+      };
+    }));
+    await page.waitForTimeout(200);
+  }
+
+  const first = dimensions[0];
+  for (const dimensionsAtSample of dimensions.slice(1)) {
+    expect(dimensionsAtSample.page).toBeCloseTo(first.page, 0);
+    expect(dimensionsAtSample.host).toBeCloseTo(first.host, 0);
+    expect(dimensionsAtSample.canvas).toBeLessThan(dimensionsAtSample.host);
+  }
+});

@@ -674,16 +674,19 @@ progress {
   min-height: 520px;
   flex: 1;
   overflow: hidden;
+  contain: layout paint;
   border: 1px solid rgba(255, 255, 255, 0.16);
   border-radius: 14px;
   background: #0c2528;
 }
 
 .preview-canvas {
+  position: absolute;
+  inset: 0 0 36px;
   display: block;
   width: 100%;
   height: calc(100% - 36px);
-  min-height: 480px;
+  min-height: 0;
   touch-action: none;
 }
 
@@ -783,10 +786,6 @@ footer {
 
   .preview-canvas-host {
     min-height: 420px;
-  }
-
-  .preview-canvas {
-    min-height: 380px;
   }
 
   footer {
