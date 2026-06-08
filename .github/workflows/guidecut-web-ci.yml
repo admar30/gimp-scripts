@@ -1,0 +1,74 @@
+name: Guidecut Web CI
+
+on:
+  pull_request:
+    paths:
+      - "guidecut-webapp/**"
+      - "iso216-guidecut/**"
+      - ".github/workflows/guidecut-web-ci.yml"
+  push:
+    branches: ["main"]
+    paths:
+      - "guidecut-webapp/**"
+      - "iso216-guidecut/**"
+      - ".github/workflows/guidecut-web-ci.yml"
+
+jobs:
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: guidecut-webapp
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: guidecut-webapp/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm run test:run
+      - run: npm run build
+
+  browser-smoke:
+    runs-on: ubuntu-latest
+    needs: web
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - project: chromium
+            engine: chromium
+          - project: firefox
+            engine: firefox
+          - project: webkit
+            engine: webkit
+          - project: mobile
+            engine: webkit
+    defaults:
+      run:
+        working-directory: guidecut-webapp
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: guidecut-webapp/package-lock.json
+      - run: npm ci
+      - run: npx playwright install --with-deps ${{ matrix.engine }}
+      - run: npm run build
+      - run: node scripts/run-e2e.mjs --project=${{ matrix.project }} --workers=1
+
+  python-parity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: python -m pip install pillow pytest
+      - run: python -m pytest -q
+        working-directory: iso216-guidecut
