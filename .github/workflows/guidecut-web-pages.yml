@@ -3,9 +3,6 @@ name: Deploy Guidecut Web
 on:
   push:
     branches: ["main"]
-    paths:
-      - "guidecut-webapp/**"
-      - ".github/workflows/guidecut-web-pages.yml"
   workflow_dispatch:
 
 permissions:
@@ -20,8 +17,16 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    outputs:
+      source_sha: ${{ steps.source.outputs.sha }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: main
+      - name: Record source revision
+        id: source
+        shell: bash
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -45,6 +50,22 @@ jobs:
     runs-on: ubuntu-latest
     needs: build
     steps:
+      - name: Verify build is still current
+        uses: actions/github-script@v7
+        env:
+          SOURCE_SHA: ${{ needs.build.outputs.source_sha }}
+        with:
+          script: |
+            const { data: branch } = await github.rest.repos.getBranch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              branch: "main",
+            });
+            if (branch.commit.sha !== process.env.SOURCE_SHA) {
+              core.setFailed(
+                `Skipping stale build ${process.env.SOURCE_SHA}; main is ${branch.commit.sha}.`,
+              );
+            }
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
