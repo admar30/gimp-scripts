@@ -1,0 +1,30 @@
+{
+  "orientations": [
+    { "width": 1000, "height": 1200, "expected": "portrait" },
+    { "width": 1200, "height": 1000, "expected": "landscape" },
+    { "width": 1000, "height": 1000, "expected": "square" }
+  ],
+  "presetGrids": [
+    { "target": "A3", "orientation": "portrait", "cols": 1, "rows": 2 },
+    { "target": "A3", "orientation": "landscape", "cols": 2, "rows": 1 },
+    { "target": "A2", "orientation": "portrait", "cols": 2, "rows": 2 },
+    { "target": "A1", "orientation": "portrait", "cols": 2, "rows": 4 },
+    { "target": "A1", "orientation": "landscape", "cols": 4, "rows": 2 },
+    { "target": "A0", "orientation": "portrait", "cols": 4, "rows": 4 },
+    { "target": "A0", "orientation": "landscape", "cols": 4, "rows": 4 }
+  ],
+  "guides": {
+    "width": 2480,
+    "height": 3508,
+    "cols": 2,
+    "rows": 4,
+    "vertical": [1240],
+    "horizontal": [877, 1754, 2631]
+  },
+  "cropCases": [
+    { "width": 1000, "height": 500, "bias": 0, "axis": "x", "leading": 0 },
+    { "width": 1000, "height": 500, "bias": 50, "axis": "x" },
+    { "width": 500, "height": 1000, "bias": 100, "axis": "y", "trailing": 0 },
+    { "width": 2480, "height": 3508, "bias": 50, "axis": null, "excess": 0 }
+  ]
+}

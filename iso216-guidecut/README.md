@@ -1,5 +1,13 @@
 # ISO216 Guidecut
 
+Guidecut is also available as a client-only React web app:
+
+- Hosted app: <https://admar30.github.io/gimp-scripts/>
+- Web source and development instructions: [`../guidecut-webapp`](../guidecut-webapp/README.md)
+
+The web app processes selected files entirely inside the browser. It does not
+upload artwork to a server.
+
 ## ISO216 Guidecut CLI
 
 `iso216_guidecut.py` splits a source file into ISO216 tile grids and exports a
