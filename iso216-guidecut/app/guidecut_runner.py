@@ -10,6 +10,7 @@ import re
 import subprocess
 import sys
 import threading
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from statistics import median
@@ -28,9 +29,17 @@ from iso216_guidecut import (
     compute_expand_crop_rect,
     compute_grid,
     compute_guides,
+    compute_tile_crop,
     detect_orientation,
+    parse_block_index,
+    parse_transform_float,
+    parse_transform_scale,
     parse_target_format,
+    render_transformed_source,
     resolve_grid_selection,
+    selected_block_output_token,
+    TransformCutOptions,
+    validate_selected_block,
 )
 
 
@@ -63,6 +72,27 @@ GUIDE_PRIMARY_CANDIDATES = (
 )
 GUIDE_HALO_CANDIDATES = ("#111111", "#FFFFFF")
 GUIDE_CONTRAST_HALO_THRESHOLD = 2.5
+
+
+@dataclass(frozen=True)
+class TransformCutUiOptions:
+    enabled: bool = False
+    offset_x_px: float = 0.0
+    offset_y_px: float = 0.0
+    rotation_deg: float = 0.0
+    scale: float = 1.0
+    block_col: int = 0
+    block_row: int = 0
+
+    def to_cli_options(self) -> TransformCutOptions:
+        return TransformCutOptions(
+            offset_x_px=self.offset_x_px,
+            offset_y_px=self.offset_y_px,
+            rotation_deg=self.rotation_deg,
+            scale=self.scale,
+            block_col=self.block_col,
+            block_row=self.block_row,
+        )
 
 
 def _hex_to_rgb(color: str) -> tuple[int, int, int]:
@@ -246,6 +276,9 @@ def build_output_pdf_path(
     output_dir: Path,
     custom_grid_cols: int | None = None,
     custom_grid_rows: int | None = None,
+    transform_cut: bool = False,
+    transform_block_col: int = 0,
+    transform_block_row: int = 0,
     now_local: datetime | None = None,
 ) -> Path:
     grid_selection = resolve_grid_selection(
@@ -254,6 +287,8 @@ def build_output_pdf_path(
         grid_rows_value=custom_grid_rows,
     )
     output_token = grid_selection.output_token
+    if transform_cut:
+        output_token = selected_block_output_token(output_token, transform_block_col, transform_block_row)
     now_local = now_local or datetime.now().astimezone()
     timestamp = now_local.strftime("%Y%m%d-%H%M%S")
     stem = input_path.stem
@@ -280,6 +315,13 @@ def build_command(
     expand_bias_percent: float | int = 50.0,
     custom_grid_cols: int | None = None,
     custom_grid_rows: int | None = None,
+    transform_cut: bool = False,
+    transform_offset_x: float | int | str = 0.0,
+    transform_offset_y: float | int | str = 0.0,
+    transform_rotation_deg: float | int | str = 0.0,
+    transform_scale: float | int | str = 1.0,
+    transform_block_col: int | str = 0,
+    transform_block_row: int | str = 0,
 ) -> list[str]:
     grid_selection = resolve_grid_selection(
         target_format_value=target_format,
@@ -302,7 +344,88 @@ def build_command(
     if expand_to_format:
         bias = clamp_expand_bias_percent(expand_bias_percent)
         command.extend(["--expand-to-format", "--expand-bias-percent", f"{bias:.4g}"])
+    if transform_cut:
+        transform_options = parse_transform_cut_options(
+            enabled=True,
+            offset_x=transform_offset_x,
+            offset_y=transform_offset_y,
+            rotation_deg=transform_rotation_deg,
+            scale=transform_scale,
+            block_col=transform_block_col,
+            block_row=transform_block_row,
+        )
+        command.extend(
+            [
+                "--transform-cut",
+                "--transform-offset-x",
+                f"{transform_options.offset_x_px:.4g}",
+                "--transform-offset-y",
+                f"{transform_options.offset_y_px:.4g}",
+                "--transform-rotation-deg",
+                f"{transform_options.rotation_deg:.4g}",
+                "--transform-scale",
+                f"{transform_options.scale:.4g}",
+                "--block-col",
+                str(transform_options.block_col),
+                "--block-row",
+                str(transform_options.block_row),
+            ]
+        )
     return command
+
+
+def parse_transform_cut_options(
+    *,
+    enabled: bool,
+    offset_x: float | int | str = 0.0,
+    offset_y: float | int | str = 0.0,
+    rotation_deg: float | int | str = 0.0,
+    scale: float | int | str = 1.0,
+    block_col: int | str = 0,
+    block_row: int | str = 0,
+) -> TransformCutUiOptions:
+    if not enabled:
+        return TransformCutUiOptions(enabled=False)
+    return TransformCutUiOptions(
+        enabled=True,
+        offset_x_px=parse_transform_float(offset_x, "Transform offset X"),
+        offset_y_px=parse_transform_float(offset_y, "Transform offset Y"),
+        rotation_deg=parse_transform_float(rotation_deg, "Transform rotation"),
+        scale=parse_transform_scale(scale),
+        block_col=parse_block_index(block_col, "Selected block column"),
+        block_row=parse_block_index(block_row, "Selected block row"),
+    )
+
+
+def selected_block_rect_for_grid(
+    block_col: int,
+    block_row: int,
+    cols: int,
+    rows: int,
+    width_px: int,
+    height_px: int,
+):
+    validate_selected_block(block_col, block_row, cols, rows)
+    return compute_tile_crop(block_col, block_row, cols, rows, width_px, height_px)
+
+
+def preview_block_for_point(
+    point_x: float,
+    point_y: float,
+    display_x: float,
+    display_y: float,
+    display_w: float,
+    display_h: float,
+    cols: int,
+    rows: int,
+) -> tuple[int, int] | None:
+    if display_w <= 0 or display_h <= 0 or cols <= 0 or rows <= 0:
+        return None
+    if not (display_x <= point_x <= display_x + display_w and display_y <= point_y <= display_y + display_h):
+        return None
+    rel_x = min(0.999999, max(0.0, (point_x - display_x) / display_w))
+    rel_y = min(0.999999, max(0.0, (point_y - display_y) / display_h))
+    return min(cols - 1, int(rel_x * cols)), min(rows - 1, int(rel_y * rows))
 
 
 def retained_input_value_after_run(input_path: Path) -> str:

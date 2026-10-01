@@ -1,7 +1,7 @@
 # Guidecut UI Specification
 
-Status: Draft v0.9  
-Date: 2026-05-31
+Status: Draft v1.0
+Date: 2026-10-01
 
 ## 1. Purpose
 Design a simple desktop UI for running `iso216_guidecut.py` without requiring terminal use.
@@ -48,6 +48,16 @@ Current pass covers core run controls, preview integration, and expand-to-format
 - First time custom mode is enabled in a session, initialize `Cols/Rows` from current preset grid.
 - Keep current custom values after run completion.
 - Do not persist custom mode/values across app restart.
+11. Transform-cut controls:
+- `Transform Cut` toggle.
+- Hidden transform controls shown when enabled:
+  - `X`: source image horizontal pan in pixels.
+  - `Y`: source image vertical pan in pixels.
+  - `Rot`: source image rotation in degrees around its center.
+  - `Scale`: uniform source image zoom factor.
+  - `Col`: selected block column, zero-based.
+  - `Row`: selected block row, zero-based.
+- `Reset` button restores transform defaults.
 
 ## 3. Non-Goals (Initial Pass)
 - Batch mode (multiple files).
@@ -81,8 +91,11 @@ Current layout in the implemented UI:
 6. Row 6: `Custom Grid` row:
   - left: `Custom Grid` toggle,
   - right: `Cols` / `Rows` fields (hidden unless custom mode is enabled).
-7. Row 7: action row, spanning all 3 columns.
-- Inside row 7:
+7. Row 7: `Transform Cut` row:
+  - left: `Transform Cut` toggle,
+  - right: transform controls (`X`, `Y`, `Rot`, `Scale`, `Col`, `Row`, `Reset`) hidden unless transform mode is enabled.
+8. Row 8: action row, spanning all 3 columns.
+- Inside row 8:
   - compact `Target Format` cluster at the left edge:
     - `Target Format` label,
     - fixed-width rounded dropdown (non-expanding) sized tightly to its clickable area,
@@ -90,7 +103,7 @@ Current layout in the implemented UI:
   - flexible spacer between target-format cluster and action buttons,
   - `Open Folder` button,
   - `Run` button on the far right.
-8. Row 8: status/output region, spanning all 3 columns and expanding vertically.
+9. Row 9: status/output region, spanning all 3 columns and expanding vertically.
 
 ### 4.3 Resize Behavior
 - The panel expands with the window.
@@ -222,6 +235,27 @@ Current layout in the implemented UI:
   - after run completion, reset expand toggle to off and bias to `50%` (input filename is already cleared to folder context).
 - No per-file cross-restart memory is required.
 
+### 5.11 Transform-Cut UX Behavior
+- Toggle off:
+  - transform arguments are not sent to CLI,
+  - output remains the normal full multi-page tile PDF.
+- Toggle on:
+  - transform controls are shown,
+  - preview keeps guide/grid layer fixed,
+  - preview transforms the source image underneath the fixed guides,
+  - selected block is highlighted,
+  - clicking inside a preview block updates `Col` and `Row`,
+  - run exports only the selected block as a single-page PDF.
+- Defaults:
+  - `X = 0`
+  - `Y = 0`
+  - `Rot = 0`
+  - `Scale = 1`
+  - `Col = 0`
+  - `Row = 0`
+- Transform values are session controls and are not persisted across app restart.
+- Selected block coordinates are zero-based from top-left guide space and must be valid for the current resolved grid.
+
 ## 6. Script Integration Contract
 Base command form:
 
@@ -247,6 +281,12 @@ With custom-grid mode enabled:
 python iso216_guidecut.py "<input_path>" --grid-cols "<1..32>" --grid-rows "<1..32>"
 ```
 
+With transform-cut mode enabled:
+
+```powershell
+python iso216_guidecut.py "<input_path>" "<target_format>" --transform-cut --transform-offset-x "<px>" --transform-offset-y "<px>" --transform-rotation-deg "<deg>" --transform-scale "<factor>" --block-col "<zero-based-col>" --block-row "<zero-based-row>"
+```
+
 Execution details:
 - Working directory: `iso216-guidecut` folder.
 - Must preserve quoted file paths to support spaces.
@@ -255,6 +295,7 @@ Execution details:
   - `<output_dir>\<input-stem>-guidecut-<target-format>-<YYYYMMDD-HHMMSS>.pdf`
 - If explicit output-directory field is empty, do not pass `--output`; use script default location (source file directory).
 - Pass expand args only when expand toggle is enabled.
+- Pass transform args only when transform toggle is enabled.
 - Pass either preset target argument or custom grid args, never both.
 - Exit code handling:
   - `0`: success message with generated output path.
@@ -296,6 +337,9 @@ Execution details:
 13. After app restart, window size and desktop location are restored from previous session when valid persisted geometry exists.
 14. Enabling `Expand to Format` reveals bias slider and running passes expand args to CLI.
 15. Bias slider and preview interactions stay synchronized for the active document (document change and post-run reset behavior are enforced).
+16. Enabling `Transform Cut` reveals transform controls and running passes transform args to CLI.
+17. With `Transform Cut` enabled, preview highlights selected block and clicking a block updates `Col`/`Row`.
+18. With `Transform Cut` enabled, run exports one selected-block page instead of the full multi-page grid.
 
 ## 10. Suggested Implementation Notes
 - Recommended stack for first implementation: Python `tkinter` (no extra dependency).

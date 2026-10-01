@@ -28,10 +28,16 @@ from iso216_guidecut import (
     detect_orientation,
     is_near_iso216_ratio,
     main,
+    parse_block_index,
     parse_expand_bias_percent,
+    parse_transform_scale,
     ordered_tiles,
     parse_target_format,
+    render_transformed_source,
     resolve_grid_selection,
+    selected_block_output_token,
+    TransformCutOptions,
+    validate_selected_block,
 )
 
 
@@ -136,6 +142,11 @@ def test_ordered_tiles_row_major() -> None:
     assert ordered_tiles(cols=2, rows=2) == [(0, 0), (1, 0), (0, 1), (1, 1)]
 
 
+def test_selected_block_output_token() -> None:
+    assert selected_block_output_token("a2", 1, 0) == "a2-block-1-0"
+    assert selected_block_output_token("grid-3x4", 2, 3) == "grid-3x4-block-2-3"
+
+
 def test_build_output_path_uses_timestamp_and_suffix(monkeypatch: pytest.MonkeyPatch) -> None:
     input_path = Path("C:/mock/poster.png")
     now = dt.datetime(2026, 3, 21, 12, 34, 56, tzinfo=dt.timezone.utc)
@@ -176,6 +187,31 @@ def test_parse_expand_bias_percent_rejects_invalid() -> None:
         parse_expand_bias_percent(-1)
     with pytest.raises(ValueError):
         parse_expand_bias_percent(101)
+
+
+def test_transform_argument_parsing_and_block_validation() -> None:
+    assert parse_transform_scale("1.25") == 1.25
+    assert parse_block_index("2", "Selected block column") == 2
+    validate_selected_block(1, 0, cols=2, rows=2)
+    with pytest.raises(ValueError):
+        parse_transform_scale("0")
+    with pytest.raises(ValueError):
+        parse_block_index("-1", "Selected block column")
+    with pytest.raises(ValueError):
+        validate_selected_block(2, 0, cols=2, rows=2)
+
+
+def test_render_transformed_source_preserves_canvas_size() -> None:
+    image = Image.new("RGB", (40, 20), "white")
+    rendered = render_transformed_source(
+        image,
+        TransformCutOptions(offset_x_px=5, offset_y_px=-2, rotation_deg=15, scale=1.1),
+    )
+    try:
+        assert rendered.size == image.size
+        assert rendered.mode == "RGB"
+    finally:
+        rendered.close()
 
 
 def test_clamp_expand_bias_percent_clamps_bounds() -> None:
@@ -337,6 +373,81 @@ def test_main_custom_grid_mode_uses_explicit_dimensions(monkeypatch: pytest.Monk
     rects = captured["rects"]
     assert len(rects) == 6
     assert rects[-1].box == (800, 250, 1200, 500)
+
+
+def test_main_transform_cut_exports_selected_single_block(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    input_path = tmp_path / "wide.png"
+    output_path = tmp_path / "out.pdf"
+    Image.new("RGB", (1200, 500), "white").save(input_path)
+
+    captured: dict[str, object] = {}
+
+    def fake_export(
+        image,  # noqa: ANN001
+        ordered_rects,  # noqa: ANN001
+        output_path: Path,  # noqa: ARG001
+        preserve_profile: bool = True,  # noqa: FBT001, FBT002
+        preserve_metadata: bool = True,  # noqa: FBT001, FBT002
+    ) -> list[str]:
+        captured["size"] = image.size
+        captured["rects"] = list(ordered_rects)
+        captured["preserve_profile"] = preserve_profile
+        captured["preserve_metadata"] = preserve_metadata
+        return []
+
+    monkeypatch.setattr(guidecut_module, "export_tiles_to_multipage_pdf", fake_export)
+
+    exit_code = main(
+        [
+            str(input_path),
+            "a2",
+            "--output",
+            str(output_path),
+            "--transform-cut",
+            "--transform-offset-x",
+            "10",
+            "--transform-offset-y",
+            "-5",
+            "--transform-rotation-deg",
+            "12",
+            "--transform-scale",
+            "1.1",
+            "--block-col",
+            "1",
+            "--block-row",
+            "0",
+            "--quiet",
+        ]
+    )
+    assert exit_code == 0
+    assert captured["size"] == (1200, 500)
+    rects = captured["rects"]
+    assert len(rects) == 1
+    assert rects[0].box == (600, 0, 1200, 250)
+    assert captured["preserve_profile"] is True
+    assert captured["preserve_metadata"] is True
+
+
+def test_main_transform_cut_rejects_out_of_range_block(tmp_path: Path) -> None:
+    input_path = tmp_path / "wide.png"
+    output_path = tmp_path / "out.pdf"
+    Image.new("RGB", (1200, 500), "white").save(input_path)
+
+    exit_code = main(
+        [
+            str(input_path),
+            "a3",
+            "--output",
+            str(output_path),
+            "--transform-cut",
+            "--block-col",
+            "2",
+            "--block-row",
+            "0",
+            "--quiet",
+        ]
+    )
+    assert exit_code == 2
 
 
 def test_main_rejects_conflicting_or_missing_grid_mode(tmp_path: Path) -> None:

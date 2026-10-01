@@ -62,6 +62,24 @@ Expand bias semantics:
 - `0%`: preserve left/top content, trim right/bottom.
 - `100%`: preserve right/bottom content, trim left/top.
 
+Optional transform-cut mode:
+```powershell
+python iso216-guidecut/cli/iso216_guidecut.py C:\path\poster.png a2 --transform-cut --block-col 1 --block-row 0
+```
+
+Transform-cut mode keeps the guide grid fixed, transforms the source image underneath it, and exports only the selected zero-based guide block as a single-page PDF.
+
+Transform options:
+```powershell
+python iso216-guidecut/cli/iso216_guidecut.py C:\path\poster.png a2 --transform-cut --transform-offset-x 24 --transform-offset-y -12 --transform-rotation-deg 8 --transform-scale 1.15 --block-col 1 --block-row 0
+```
+
+Transform semantics:
+- `--transform-offset-x` / `--transform-offset-y`: pan the source image in pixels under the fixed guide grid.
+- `--transform-rotation-deg`: rotate the source image around its center.
+- `--transform-scale`: uniform zoom factor; must be greater than `0`.
+- `--block-col` / `--block-row`: selected guide block, zero-based from top-left.
+
 ### UI
 Launch the desktop UI:
 
@@ -85,6 +103,9 @@ UI interactions in current pass:
 - `Open Folder` resolves to explicit output directory when enabled and set, otherwise resolves from input path (file parent or folder path).
 - `Expand to Format` toggle enables pre-crop to ISO ratio before guides/tiles are computed.
 - Expand bias slider (`0..100`) appears only when expand mode is on; slider is disabled when source has no excess trim axis.
+- `Transform Cut` toggle reveals source transform controls (`X`, `Y`, `Rot`, `Scale`) and selected block controls (`Col`, `Row`).
+- With transform mode enabled, preview keeps guides fixed, transforms the source image underneath, highlights the selected block, and clicking a preview block updates `Col`/`Row`.
+- With transform mode enabled, `Run` exports only the selected block as a single-page PDF.
 - `Run` executes in a background thread and streams stdout/stderr to the status panel.
 - Post-run input behavior keeps only the source folder path (filename cleared) to speed up selecting the next file.
 - Post-run expand behavior resets to defaults (`Expand to Format` off, bias `50%`).
@@ -120,5 +141,7 @@ Custom mode:
   - `<input-stem>-guidecut-<target>-<YYYYMMDD-HHMMSS>.pdf`
 - Custom-grid outputs use token `grid-CxR` in place of target:
   - `<input-stem>-guidecut-grid-<cols>x<rows>-<YYYYMMDD-HHMMSS>.pdf`
+- Transform-cut outputs append the selected block coordinate:
+  - `<input-stem>-guidecut-<target-or-grid>-block-<col>-<row>-<YYYYMMDD-HHMMSS>.pdf`
 - Page order is top-to-bottom, left-to-right.
 - If a timestamped output filename already exists, appends `-1`, `-2`, etc.

@@ -33,6 +33,8 @@ from guidecut_runner import (
     normalize_target_format,
     open_folder,
     open_folder_command,
+    parse_transform_cut_options,
+    preview_block_for_point,
     effective_preview_state,
     relative_luminance,
     preview_guides_for_source,
@@ -51,6 +53,7 @@ from guidecut_runner import (
     preset_grid_for_orientation,
     resolve_custom_grid,
     sanitize_window_geometry,
+    selected_block_rect_for_grid,
     tooltip_text_for_custom_grid,
     tooltip_text_for_format,
 )
@@ -452,6 +455,24 @@ def test_build_output_pdf_path_custom_grid_token(monkeypatch: pytest.MonkeyPatch
     assert output.name == "poster-guidecut-grid-3x4-20260321-172000.pdf"
 
 
+def test_build_output_pdf_path_transform_block_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    input_path = Path("C:/input/poster.png")
+    output_dir = Path("C:/out")
+    now = dt.datetime(2026, 3, 21, 17, 20, 0, tzinfo=dt.timezone.utc)
+
+    monkeypatch.setattr(Path, "exists", lambda _self: False, raising=False)
+    output = build_output_pdf_path(
+        input_path,
+        target_format="a2",
+        output_dir=output_dir,
+        transform_cut=True,
+        transform_block_col=1,
+        transform_block_row=0,
+        now_local=now,
+    )
+    assert output.name == "poster-guidecut-a2-block-1-0-20260321-172000.pdf"
+
+
 def test_build_command_without_output() -> None:
     command = build_command(
         python_executable="python",
@@ -529,6 +550,30 @@ def test_build_command_with_expand_args() -> None:
     assert command[bias_index + 1] == "33.5"
 
 
+def test_build_command_with_transform_cut_args() -> None:
+    command = build_command(
+        python_executable="python",
+        script_path=Path("iso216_guidecut.py"),
+        input_path=Path("C:/in/file.avif"),
+        target_format="A2",
+        output_path=None,
+        transform_cut=True,
+        transform_offset_x=12.5,
+        transform_offset_y=-3,
+        transform_rotation_deg=22,
+        transform_scale=1.25,
+        transform_block_col=1,
+        transform_block_row=0,
+    )
+    assert "--transform-cut" in command
+    assert command[command.index("--transform-offset-x") + 1] == "12.5"
+    assert command[command.index("--transform-offset-y") + 1] == "-3"
+    assert command[command.index("--transform-rotation-deg") + 1] == "22"
+    assert command[command.index("--transform-scale") + 1] == "1.25"
+    assert command[command.index("--block-col") + 1] == "1"
+    assert command[command.index("--block-row") + 1] == "0"
+
+
 def test_build_command_without_expand_args_when_disabled() -> None:
     command = build_command(
         python_executable="python",
@@ -541,6 +586,32 @@ def test_build_command_without_expand_args_when_disabled() -> None:
     )
     assert "--expand-to-format" not in command
     assert "--expand-bias-percent" not in command
+
+
+def test_transform_helper_parsing_and_preview_block_math() -> None:
+    options = parse_transform_cut_options(
+        enabled=True,
+        offset_x="4.5",
+        offset_y="-2",
+        rotation_deg="10",
+        scale="1.5",
+        block_col="1",
+        block_row="2",
+    )
+    assert options.enabled is True
+    assert options.offset_x_px == 4.5
+    assert options.offset_y_px == -2.0
+    assert options.rotation_deg == 10.0
+    assert options.scale == 1.5
+    assert options.block_col == 1
+    assert options.block_row == 2
+
+    rect = selected_block_rect_for_grid(1, 1, cols=3, rows=2, width_px=900, height_px=400)
+    assert rect.box == (300, 200, 600, 400)
+
+    assert preview_block_for_point(50, 50, 0, 0, 300, 200, 3, 2) == (0, 0)
+    assert preview_block_for_point(299, 199, 0, 0, 300, 200, 3, 2) == (2, 1)
+    assert preview_block_for_point(301, 50, 0, 0, 300, 200, 3, 2) is None
 
 
 def test_build_command_rejects_preset_custom_conflict() -> None:

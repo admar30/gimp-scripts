@@ -32,6 +32,12 @@ ISO216_ASPECT_RATIO = math.sqrt(2.0)
 DEFAULT_EXPAND_BIAS_PERCENT = 50.0
 CUSTOM_GRID_MIN = 1
 CUSTOM_GRID_MAX = 32
+DEFAULT_TRANSFORM_OFFSET_X_PX = 0.0
+DEFAULT_TRANSFORM_OFFSET_Y_PX = 0.0
+DEFAULT_TRANSFORM_ROTATION_DEG = 0.0
+DEFAULT_TRANSFORM_SCALE = 1.0
+DEFAULT_TRANSFORM_BLOCK_COL = 0
+DEFAULT_TRANSFORM_BLOCK_ROW = 0
 
 
 @dataclass(frozen=True)
@@ -63,6 +69,16 @@ class GridSelection:
     cols: int | None
     rows: int | None
     output_token: str
+
+
+@dataclass(frozen=True)
+class TransformCutOptions:
+    offset_x_px: float = DEFAULT_TRANSFORM_OFFSET_X_PX
+    offset_y_px: float = DEFAULT_TRANSFORM_OFFSET_Y_PX
+    rotation_deg: float = DEFAULT_TRANSFORM_ROTATION_DEG
+    scale: float = DEFAULT_TRANSFORM_SCALE
+    block_col: int = DEFAULT_TRANSFORM_BLOCK_COL
+    block_row: int = DEFAULT_TRANSFORM_BLOCK_ROW
 
 
 def parse_target_format(value: str) -> str:
@@ -191,6 +207,10 @@ def ordered_tiles(cols: int, rows: int) -> list[tuple[int, int]]:
     return [(col, row) for row in range(rows) for col in range(cols)]
 
 
+def selected_block_output_token(base_token: str, block_col: int, block_row: int) -> str:
+    return f"{base_token}-block-{block_col}-{block_row}"
+
+
 def is_near_iso216_ratio(width_px: int, height_px: int, tolerance: float = 0.03) -> bool:
     if width_px <= 0 or height_px <= 0:
         return False
@@ -214,6 +234,85 @@ def parse_expand_bias_percent(value: float | int | str) -> float:
     if not (0.0 <= parsed <= 100.0):
         raise ValueError(f"Expand bias percent must be in [0, 100], got {parsed}.")
     return parsed
+
+
+def parse_transform_float(value: float | int | str, field_name: str) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field_name} must be a number, got '{value}'.") from exc
+    if not math.isfinite(parsed):
+        raise ValueError(f"{field_name} must be a finite number, got {parsed}.")
+    return parsed
+
+
+def parse_transform_scale(value: float | int | str) -> float:
+    parsed = parse_transform_float(value, "Transform scale")
+    if parsed <= 0.0:
+        raise ValueError(f"Transform scale must be greater than 0, got {parsed}.")
+    return parsed
+
+
+def parse_block_index(value: int | str, field_name: str) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field_name} must be a non-negative integer, got '{value}'.") from exc
+    if parsed < 0:
+        raise ValueError(f"{field_name} must be a non-negative integer, got {parsed}.")
+    return parsed
+
+
+def validate_selected_block(block_col: int, block_row: int, cols: int, rows: int) -> None:
+    if not (0 <= block_col < cols):
+        raise ValueError(f"Selected block column must be in [0, {cols - 1}], got {block_col}.")
+    if not (0 <= block_row < rows):
+        raise ValueError(f"Selected block row must be in [0, {rows - 1}], got {block_row}.")
+
+
+def _has_alpha(image: Image.Image) -> bool:
+    return image.mode in {"RGBA", "LA"} or ("transparency" in image.info)
+
+
+def render_transformed_source(image: Image.Image, options: TransformCutOptions) -> Image.Image:
+    """Render the transformed source underneath a fixed guide-space canvas."""
+    width_px, height_px = image.size
+    if width_px <= 0 or height_px <= 0:
+        raise ValueError("Image dimensions must be positive.")
+
+    resample = Image.Resampling.BICUBIC if hasattr(Image, "Resampling") else Image.BICUBIC
+    work = image.convert("RGBA")
+    scaled_w = max(1, int(round(width_px * options.scale)))
+    scaled_h = max(1, int(round(height_px * options.scale)))
+    if (scaled_w, scaled_h) != work.size:
+        scaled = work.resize((scaled_w, scaled_h), resample)
+        work.close()
+        work = scaled
+
+    if options.rotation_deg % 360:
+        rotated = work.rotate(
+            options.rotation_deg,
+            expand=True,
+            resample=resample,
+            fillcolor=(0, 0, 0, 0),
+        )
+        work.close()
+        work = rotated
+
+    canvas = Image.new("RGBA", (width_px, height_px), (0, 0, 0, 0) if _has_alpha(image) else (255, 255, 255, 255))
+    paste_x = int(round((width_px - work.width) / 2.0 + options.offset_x_px))
+    paste_y = int(round((height_px - work.height) / 2.0 + options.offset_y_px))
+    canvas.paste(work, (paste_x, paste_y), work)
+
+    work.close()
+
+    if image.mode == "RGBA":
+        rendered = canvas
+    else:
+        rendered = canvas.convert(_pdf_capable_mode(image.mode))
+        canvas.close()
+    rendered.info = dict(image.info)
+    return rendered
 
 
 def _target_ratio_for_orientation(orientation: str) -> float:
@@ -492,6 +591,47 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help=f"Custom grid rows ({CUSTOM_GRID_MIN}..{CUSTOM_GRID_MAX}). Requires --grid-cols.",
     )
+    parser.add_argument(
+        "--transform-cut",
+        action="store_true",
+        help="Transform the source under a fixed guide grid and export one selected block.",
+    )
+    parser.add_argument(
+        "--transform-offset-x",
+        type=float,
+        default=DEFAULT_TRANSFORM_OFFSET_X_PX,
+        help="Transform-cut horizontal source offset in pixels.",
+    )
+    parser.add_argument(
+        "--transform-offset-y",
+        type=float,
+        default=DEFAULT_TRANSFORM_OFFSET_Y_PX,
+        help="Transform-cut vertical source offset in pixels.",
+    )
+    parser.add_argument(
+        "--transform-rotation-deg",
+        type=float,
+        default=DEFAULT_TRANSFORM_ROTATION_DEG,
+        help="Transform-cut source rotation in degrees around the source center.",
+    )
+    parser.add_argument(
+        "--transform-scale",
+        type=float,
+        default=DEFAULT_TRANSFORM_SCALE,
+        help="Transform-cut uniform source zoom factor. Must be greater than 0.",
+    )
+    parser.add_argument(
+        "--block-col",
+        type=int,
+        default=DEFAULT_TRANSFORM_BLOCK_COL,
+        help="Transform-cut selected block column, zero-based from the left.",
+    )
+    parser.add_argument(
+        "--block-row",
+        type=int,
+        default=DEFAULT_TRANSFORM_BLOCK_ROW,
+        help="Transform-cut selected block row, zero-based from the top.",
+    )
     return parser
 
 
@@ -515,15 +655,33 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(str(exc), file=sys.stderr)
         return 2
 
+    try:
+        transform_options = TransformCutOptions(
+            offset_x_px=parse_transform_float(args.transform_offset_x, "Transform offset X"),
+            offset_y_px=parse_transform_float(args.transform_offset_y, "Transform offset Y"),
+            rotation_deg=parse_transform_float(args.transform_rotation_deg, "Transform rotation"),
+            scale=parse_transform_scale(args.transform_scale),
+            block_col=parse_block_index(args.block_col, "Selected block column"),
+            block_row=parse_block_index(args.block_row, "Selected block row"),
+        )
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
     if not input_path.exists() or not input_path.is_file():
         print(f"Input path does not exist or is not a file: {input_path}", file=sys.stderr)
         return 2
 
-    output_path = (
-        args.output.expanduser().resolve()
-        if args.output
-        else build_output_path(input_path, grid_selection.output_token)
+    output_token = (
+        selected_block_output_token(
+            grid_selection.output_token,
+            transform_options.block_col,
+            transform_options.block_row,
+        )
+        if args.transform_cut
+        else grid_selection.output_token
     )
+    output_path = args.output.expanduser().resolve() if args.output else build_output_path(input_path, output_token)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     try:
@@ -569,15 +727,47 @@ def main(argv: Sequence[str] | None = None) -> int:
             for col, row in tile_indices
         ]
 
-        warnings.extend(
-            export_tiles_to_multipage_pdf(
-            image=working_image,
-            ordered_rects=rects,
-            output_path=output_path,
-            preserve_profile=True,
-            preserve_metadata=True,
-        )
-        )
+        if args.transform_cut:
+            validate_selected_block(
+                transform_options.block_col,
+                transform_options.block_row,
+                cols,
+                rows,
+            )
+            selected_rect = compute_tile_crop(
+                transform_options.block_col,
+                transform_options.block_row,
+                cols,
+                rows,
+                width_px,
+                height_px,
+            )
+            transformed = render_transformed_source(working_image, transform_options)
+            try:
+                warnings.extend(
+                    export_tiles_to_multipage_pdf(
+                        image=transformed,
+                        ordered_rects=[selected_rect],
+                        output_path=output_path,
+                        preserve_profile=True,
+                        preserve_metadata=True,
+                    )
+                )
+            finally:
+                transformed.close()
+        else:
+            warnings.extend(
+                export_tiles_to_multipage_pdf(
+                    image=working_image,
+                    ordered_rects=rects,
+                    output_path=output_path,
+                    preserve_profile=True,
+                    preserve_metadata=True,
+                )
+            )
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
     except Exception as exc:  # noqa: BLE001
         print(str(exc), file=sys.stderr)
         return 1
@@ -614,7 +804,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         else:
             print("Expand to format: disabled")
         print(f"Orientation: {orientation}")
-        print(f"Grid: {cols}x{rows} ({cols * rows} pages)")
+        if args.transform_cut:
+            print(f"Grid: {cols}x{rows} ({cols * rows} selectable blocks)")
+            print(
+                "Transform cut: enabled "
+                f"(offset={transform_options.offset_x_px:.2f},{transform_options.offset_y_px:.2f}px, "
+                f"rotation={transform_options.rotation_deg:.2f}deg, "
+                f"scale={transform_options.scale:.4g}, "
+                f"block={transform_options.block_col},{transform_options.block_row})"
+            )
+            print("Output pages: 1")
+        else:
+            print(f"Grid: {cols}x{rows} ({cols * rows} pages)")
+            print("Transform cut: disabled")
         print(f"Vertical guides (px): {_format_int_list(v_guides)}")
         print(f"Horizontal guides (px): {_format_int_list(h_guides)}")
         print(f"Output PDF: {output_path}")
