@@ -43,6 +43,8 @@ from guidecut_runner import (
     run_command_streaming,
     sample_line_luminance,
     save_ui_state,
+    scaled_preview_crop_box,
+    scale_transform_for_preview,
     selected_block_rect_for_grid,
     tooltip_text_for_custom_grid,
     tooltip_text_for_format,
@@ -63,6 +65,7 @@ UI_PANEL_MIN_WIDTH = 460
 DEFAULT_PREVIEW_SPLIT_RATIO = 0.5
 AUTOFIT_WIDTH_TOLERANCE_PX = 2
 PREVIEW_CONTRAST_DEBOUNCE_MS = 140
+PREVIEW_MAX_EDGE_PX = 1600
 GUIDE_DASH_PATTERN = (6, 4)
 GUIDE_STROKE_WIDTH = 1
 GUIDE_HALO_WIDTH = 3
@@ -475,6 +478,9 @@ class GuidecutApp(tk.Tk):
         self._preview_panel_visible = False
         self._preview_source_path: Path | None = None
         self._preview_source_image: Image.Image | None = None
+        self._preview_source_size: tuple[int, int] | None = None
+        self._preview_transform_key: tuple | None = None
+        self._preview_transformed_image: Image.Image | None = None
         self._preview_tk_image: ImageTk.PhotoImage | None = None
         self._preview_loading_path: Path | None = None
         self._preview_load_request_id = 0
@@ -995,6 +1001,7 @@ class GuidecutApp(tk.Tk):
     def _close_preview_source(self) -> None:
         self._cancel_contrast_refresh()
         self._invalidate_guide_style_cache()
+        self._close_preview_transform_cache()
         if self._preview_source_image is not None:
             try:
                 self._preview_source_image.close()
@@ -1002,6 +1009,13 @@ class GuidecutApp(tk.Tk):
                 pass
         self._preview_source_image = None
         self._preview_source_path = None
+        self._preview_source_size = None
+
+    def _close_preview_transform_cache(self) -> None:
+        if self._preview_transformed_image is not None:
+            self._preview_transformed_image.close()
+        self._preview_transformed_image = None
+        self._preview_transform_key = None
 
     def _update_preview_split_ratio(self) -> None:
         if not self._preview_panel_visible:
@@ -1101,7 +1115,7 @@ class GuidecutApp(tk.Tk):
         width_px: int | None = None
         height_px: int | None = None
         if self._preview_source_path == file_path and self._preview_source_image is not None:
-            width_px, height_px = self._preview_source_image.size
+            width_px, height_px = self._preview_source_size or self._preview_source_image.size
         else:
             try:
                 with Image.open(file_path) as image:
@@ -1167,6 +1181,8 @@ class GuidecutApp(tk.Tk):
 
     def _on_transform_toggle(self) -> None:
         self._toggle_transform_controls()
+        if not self.transform_cut_var.get():
+            self._close_preview_transform_cache()
         self._clamp_transform_block_to_current_grid()
         if self._preview_panel_visible and self._preview_source_image is not None:
             self._invalidate_guide_style_cache()
@@ -1303,7 +1319,7 @@ class GuidecutApp(tk.Tk):
             return None
 
         if self._preview_source_path == file_path and self._preview_source_image is not None:
-            width_px, height_px = self._preview_source_image.size
+            width_px, height_px = self._preview_source_size or self._preview_source_image.size
             return expand_crop_for_source(width_px, height_px, self.expand_bias_var.get())
 
         try:
@@ -1391,8 +1407,16 @@ class GuidecutApp(tk.Tk):
                 except EOFError:
                     pass
                 corrected = ImageOps.exif_transpose(source)
-                corrected.load()
-                preview_image = corrected.convert("RGB")
+                source_size = corrected.size
+                try:
+                    corrected.thumbnail(
+                        (PREVIEW_MAX_EDGE_PX, PREVIEW_MAX_EDGE_PX),
+                        self._resample_filter(),
+                        reducing_gap=3.0,
+                    )
+                    preview_image = corrected.convert("RGB")
+                finally:
+                    corrected.close()
         except Exception as exc:  # noqa: BLE001
             self._event_queue.put(
                 (
@@ -1413,6 +1437,7 @@ class GuidecutApp(tk.Tk):
                     "request_id": request_id,
                     "path": str(file_path),
                     "image": preview_image,
+                    "size": source_size,
                 },
             )
         )
@@ -1435,6 +1460,7 @@ class GuidecutApp(tk.Tk):
 
         self._close_preview_source()
         self._preview_source_image = image
+        self._preview_source_size = tuple(payload["size"])
         self._preview_source_path = loaded_path
         self._preview_autofit_pending = True
         self._invalidate_guide_style_cache()
@@ -1562,7 +1588,7 @@ class GuidecutApp(tk.Tk):
         if not self._preview_panel_visible or self._preview_source_image is None:
             return
 
-        source_w, source_h = self._preview_source_image.size
+        source_w, source_h = self._preview_source_size or self._preview_source_image.size
         if source_w <= 0 or source_h <= 0:
             self._clear_preview_canvas()
             self._set_preview_status("Unable to preview file: invalid image dimensions.")
@@ -1574,23 +1600,45 @@ class GuidecutApp(tk.Tk):
         if self.expand_to_format_var.get():
             crop_info = expand_crop_for_source(source_w, source_h, self.expand_bias_var.get())
             if crop_info.excess_px > 0:
-                working_image = self._preview_source_image.crop(crop_info.rect.box)
+                preview_crop_box = scaled_preview_crop_box(
+                    crop_info.rect,
+                    (source_w, source_h),
+                    self._preview_source_image.size,
+                )
+                working_image = self._preview_source_image.crop(preview_crop_box)
                 owns_working_image = True
 
-        working_w, working_h = working_image.size
+        working_w, working_h = (
+            (crop_info.rect.x1 - crop_info.rect.x0, crop_info.rect.y1 - crop_info.rect.y0)
+            if crop_info is not None and crop_info.excess_px > 0
+            else (source_w, source_h)
+        )
         transform_options = self._current_transform_options(strict=False)
         preview_image = working_image
-        owns_preview_image = False
         if transform_options.enabled:
-            preview_image = render_transformed_source(working_image, transform_options.to_cli_options())
-            owns_preview_image = True
+            preview_options = scale_transform_for_preview(
+                transform_options.to_cli_options(),
+                (working_w, working_h),
+                working_image.size,
+            )
+            transform_key = (
+                id(self._preview_source_image),
+                crop_info.rect.box if crop_info is not None else None,
+                preview_options.offset_x_px,
+                preview_options.offset_y_px,
+                preview_options.rotation_deg,
+                preview_options.scale,
+            )
+            if self._preview_transform_key != transform_key or self._preview_transformed_image is None:
+                self._close_preview_transform_cache()
+                self._preview_transformed_image = render_transformed_source(working_image, preview_options)
+                self._preview_transform_key = transform_key
+            preview_image = self._preview_transformed_image
 
         if self._preview_autofit_pending:
             canvas_w = self.preview_canvas.winfo_width()
             canvas_h = self.preview_canvas.winfo_height()
             if canvas_w <= 4 or canvas_h <= 4:
-                if owns_preview_image:
-                    preview_image.close()
                 if owns_working_image:
                     working_image.close()
                 return
@@ -1602,8 +1650,6 @@ class GuidecutApp(tk.Tk):
         canvas_w = self.preview_canvas.winfo_width()
         canvas_h = self.preview_canvas.winfo_height()
         if canvas_w <= 4 or canvas_h <= 4:
-            if owns_preview_image:
-                preview_image.close()
             if owns_working_image:
                 working_image.close()
             return
@@ -1780,8 +1826,6 @@ class GuidecutApp(tk.Tk):
                 f"| rot {transform_options.rotation_deg:.1f}deg scale {transform_options.scale:.3g}"
             )
         self._set_preview_status(status_text)
-        if owns_preview_image:
-            preview_image.close()
         if owns_working_image:
             working_image.close()
 

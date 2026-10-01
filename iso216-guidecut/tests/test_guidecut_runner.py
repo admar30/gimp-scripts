@@ -46,6 +46,8 @@ from guidecut_runner import (
     run_command_streaming,
     sample_line_luminance,
     save_ui_state,
+    scaled_preview_crop_box,
+    scale_transform_for_preview,
     sanitize_preview_split_ratio,
     sanitize_expand_bias_percent,
     sanitize_ui_state,
@@ -57,6 +59,19 @@ from guidecut_runner import (
     tooltip_text_for_custom_grid,
     tooltip_text_for_format,
 )
+from iso216_guidecut import Rect, TransformCutOptions
+
+
+def test_preview_geometry_tracks_original_pixels_after_downsampling() -> None:
+    crop = Rect(1000, 500, 3000, 2500)
+    assert scaled_preview_crop_box(crop, (4000, 3000), (1600, 1200)) == (400, 200, 1200, 1000)
+
+    options = TransformCutOptions(offset_x_px=200, offset_y_px=-90, rotation_deg=15, scale=1.25)
+    preview = scale_transform_for_preview(options, (2000, 2000), (800, 800))
+    assert preview.offset_x_px == 80
+    assert preview.offset_y_px == -36
+    assert preview.rotation_deg == options.rotation_deg
+    assert preview.scale == options.scale
 
 
 def test_normalize_target_format() -> None:

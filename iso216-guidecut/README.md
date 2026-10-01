@@ -115,6 +115,7 @@ UI interactions in current pass:
 - Preview panel includes a draggable vertical divider for resizing UI-vs-preview width allocation.
 - Preview panel auto-fits width to rendered content on open and avoids cumulative window-size drift across reopen/restart cycles.
 - Preview displays guide overlays for the selected target format and updates when target format changes.
+- Preview uses a bounded image bitmap for responsive transforms; guide positions and export still use the source's original pixel dimensions.
 - With expand mode enabled, preview renders cropped working area and guides against cropped geometry.
 - Preview image drag along excess trim axis updates expand bias live and stays synchronized with the slider.
 - Guide overlays use adaptive contrast sampling (with optional halo stroke) for visibility on dark/light/mixed documents.

@@ -10,7 +10,7 @@ import re
 import subprocess
 import sys
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from statistics import median
@@ -35,6 +35,7 @@ from iso216_guidecut import (
     parse_transform_float,
     parse_transform_scale,
     parse_target_format,
+    Rect,
     render_transformed_source,
     resolve_grid_selection,
     selected_block_output_token,
@@ -407,6 +408,39 @@ def selected_block_rect_for_grid(
 ):
     validate_selected_block(block_col, block_row, cols, rows)
     return compute_tile_crop(block_col, block_row, cols, rows, width_px, height_px)
+
+
+def scaled_preview_crop_box(
+    rect: Rect,
+    source_size: tuple[int, int],
+    preview_size: tuple[int, int],
+) -> tuple[int, int, int, int]:
+    """Map an original-pixel crop onto a bounded preview bitmap."""
+    source_w, source_h = source_size
+    preview_w, preview_h = preview_size
+    if min(source_w, source_h, preview_w, preview_h) <= 0:
+        raise ValueError("Source and preview dimensions must be positive.")
+    x0 = max(0, min(preview_w - 1, round(rect.x0 * preview_w / source_w)))
+    y0 = max(0, min(preview_h - 1, round(rect.y0 * preview_h / source_h)))
+    x1 = max(x0 + 1, min(preview_w, round(rect.x1 * preview_w / source_w)))
+    y1 = max(y0 + 1, min(preview_h, round(rect.y1 * preview_h / source_h)))
+    return x0, y0, x1, y1
+
+
+def scale_transform_for_preview(
+    options: TransformCutOptions,
+    source_size: tuple[int, int],
+    preview_size: tuple[int, int],
+) -> TransformCutOptions:
+    source_w, source_h = source_size
+    preview_w, preview_h = preview_size
+    if min(source_w, source_h, preview_w, preview_h) <= 0:
+        raise ValueError("Source and preview dimensions must be positive.")
+    return replace(
+        options,
+        offset_x_px=options.offset_x_px * preview_w / source_w,
+        offset_y_px=options.offset_y_px * preview_h / source_h,
+    )
 
 
 def preview_block_for_point(

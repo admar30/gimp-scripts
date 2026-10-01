@@ -34,6 +34,8 @@ from iso216_guidecut import (
     ordered_tiles,
     parse_target_format,
     render_transformed_source,
+    render_transformed_tile,
+    Rect,
     resolve_grid_selection,
     selected_block_output_token,
     TransformCutOptions,
@@ -212,6 +214,42 @@ def test_render_transformed_source_preserves_canvas_size() -> None:
         assert rendered.mode == "RGB"
     finally:
         rendered.close()
+
+
+def test_render_transformed_tile_preserves_offset_and_rotation() -> None:
+    image = Image.new("RGB", (6, 4))
+    image.putdata([(x * 30, y * 50, 10) for y in range(4) for x in range(6)])
+
+    shifted = render_transformed_tile(image, TransformCutOptions(offset_x_px=1), Rect(0, 0, 3, 2))
+    rotated = render_transformed_tile(image, TransformCutOptions(rotation_deg=90), Rect(1, 1, 5, 3))
+    try:
+        assert shifted.size == (3, 2)
+        assert shifted.getpixel((0, 0)) == (255, 255, 255)
+        assert shifted.getpixel((1, 0)) == image.getpixel((0, 0))
+        assert rotated.tobytes() == image.rotate(90).crop((1, 1, 5, 3)).tobytes()
+    finally:
+        shifted.close()
+        rotated.close()
+
+
+def test_render_transformed_tile_retains_alpha_and_limits_canvas() -> None:
+    image = Image.new("RGBA", (8, 8), (12, 34, 56, 255))
+    rendered = render_transformed_tile(
+        image,
+        TransformCutOptions(offset_x_px=4, scale=1000),
+        Rect(0, 0, 2, 2),
+    )
+    try:
+        assert rendered.size == (2, 2)
+        assert rendered.mode == "RGBA"
+    finally:
+        rendered.close()
+
+    transparent = render_transformed_tile(image, TransformCutOptions(offset_x_px=20), Rect(0, 0, 2, 2))
+    try:
+        assert transparent.getpixel((0, 0))[3] == 0
+    finally:
+        transparent.close()
 
 
 def test_clamp_expand_bias_percent_clamps_bounds() -> None:
@@ -420,10 +458,10 @@ def test_main_transform_cut_exports_selected_single_block(monkeypatch: pytest.Mo
         ]
     )
     assert exit_code == 0
-    assert captured["size"] == (1200, 500)
+    assert captured["size"] == (600, 250)
     rects = captured["rects"]
     assert len(rects) == 1
-    assert rects[0].box == (600, 0, 1200, 250)
+    assert rects[0].box == (0, 0, 600, 250)
     assert captured["preserve_profile"] is True
     assert captured["preserve_metadata"] is True
 

@@ -276,41 +276,60 @@ def _has_alpha(image: Image.Image) -> bool:
 
 def render_transformed_source(image: Image.Image, options: TransformCutOptions) -> Image.Image:
     """Render the transformed source underneath a fixed guide-space canvas."""
+    return render_transformed_tile(image, options, Rect(0, 0, image.width, image.height))
+
+
+def render_transformed_tile(image: Image.Image, options: TransformCutOptions, tile: Rect) -> Image.Image:
+    """Sample one guide block directly from the transformed source."""
     width_px, height_px = image.size
-    if width_px <= 0 or height_px <= 0:
-        raise ValueError("Image dimensions must be positive.")
+    if width_px <= 0 or height_px <= 0 or tile.x1 <= tile.x0 or tile.y1 <= tile.y0:
+        raise ValueError("Image and tile dimensions must be positive.")
+    if not math.isfinite(options.scale) or options.scale <= 0:
+        raise ValueError("Transform scale must be finite and greater than 0.")
 
-    resample = Image.Resampling.BICUBIC if hasattr(Image, "Resampling") else Image.BICUBIC
-    work = image.convert("RGBA")
-    scaled_w = max(1, int(round(width_px * options.scale)))
-    scaled_h = max(1, int(round(height_px * options.scale)))
-    if (scaled_w, scaled_h) != work.size:
-        scaled = work.resize((scaled_w, scaled_h), resample)
-        work.close()
-        work = scaled
+    angle = math.radians(options.rotation_deg)
+    cosine = math.cos(angle) / options.scale
+    sine = math.sin(angle) / options.scale
+    center_x, center_y = width_px / 2.0, height_px / 2.0
+    tile_origin_x = tile.x0 - center_x - options.offset_x_px
+    tile_origin_y = tile.y0 - center_y - options.offset_y_px
+    transform = (
+        cosine,
+        -sine,
+        center_x + cosine * tile_origin_x - sine * tile_origin_y,
+        sine,
+        cosine,
+        center_y + sine * tile_origin_x + cosine * tile_origin_y,
+    )
 
-    if options.rotation_deg % 360:
-        rotated = work.rotate(
-            options.rotation_deg,
-            expand=True,
-            resample=resample,
-            fillcolor=(0, 0, 0, 0),
-        )
-        work.close()
-        work = rotated
-
-    canvas = Image.new("RGBA", (width_px, height_px), (0, 0, 0, 0) if _has_alpha(image) else (255, 255, 255, 255))
-    paste_x = int(round((width_px - work.width) / 2.0 + options.offset_x_px))
-    paste_y = int(round((height_px - work.height) / 2.0 + options.offset_y_px))
-    canvas.paste(work, (paste_x, paste_y), work)
-
-    work.close()
-
-    if image.mode == "RGBA":
-        rendered = canvas
+    has_alpha = _has_alpha(image)
+    page_mode = "RGBA" if image.mode == "RGBA" else _pdf_capable_mode(image.mode)
+    source = image if image.mode in {"RGB", "RGBA", "L", "CMYK"} else image.convert("RGBA" if has_alpha else "RGB")
+    if has_alpha:
+        fill = (0, 0, 0, 0)
+    elif source.mode == "L":
+        fill = 255
+    elif source.mode == "CMYK":
+        fill = (0, 0, 0, 0)
     else:
-        rendered = canvas.convert(_pdf_capable_mode(image.mode))
-        canvas.close()
+        fill = (255, 255, 255)
+    resample = Image.Resampling.BICUBIC if hasattr(Image, "Resampling") else Image.BICUBIC
+    try:
+        rendered = source.transform(
+            (tile.x1 - tile.x0, tile.y1 - tile.y0),
+            Image.Transform.AFFINE,
+            transform,
+            resample=resample,
+            fillcolor=fill,
+        )
+    finally:
+        if source is not image:
+            source.close()
+
+    if rendered.mode != page_mode:
+        normalized = rendered.convert(page_mode)
+        rendered.close()
+        rendered = normalized
     rendered.info = dict(image.info)
     return rendered
 
@@ -742,12 +761,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 width_px,
                 height_px,
             )
-            transformed = render_transformed_source(working_image, transform_options)
+            transformed = render_transformed_tile(working_image, transform_options, selected_rect)
             try:
                 warnings.extend(
                     export_tiles_to_multipage_pdf(
                         image=transformed,
-                        ordered_rects=[selected_rect],
+                        ordered_rects=[Rect(0, 0, transformed.width, transformed.height)],
                         output_path=output_path,
                         preserve_profile=True,
                         preserve_metadata=True,
