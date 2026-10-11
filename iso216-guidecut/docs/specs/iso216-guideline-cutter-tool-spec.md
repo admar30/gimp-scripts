@@ -1,7 +1,7 @@
 # ISO216 Guideline Cutter Tool Specification
 
-Status: Draft v1.3
-Date: 2026-10-01
+Status: Draft v1.4
+Date: 2026-10-10
 
 ## 1. Purpose
 This tool takes an input document/image and a target ISO216 format (`a3`, `a2`, `a1`, or `a0`), computes guide positions that represent bisection cut lines, and exports all tiles into a single multi-page PDF intended for A4 printing and physical assembly.
@@ -55,6 +55,7 @@ Behavior:
 - `--transform-scale <factor>` (float, default `1.0`, must be greater than `0`)
 - `--block-col <int>` (zero-based selected block column, default `0`)
 - `--block-row <int>` (zero-based selected block row, default `0`)
+- `--block <col,row>` (repeatable zero-based selected block coordinate; cannot be mixed with `--block-col` / `--block-row`)
 
 Behavior:
 - Guides/grid remain a fixed cutting frame.
@@ -63,8 +64,9 @@ Behavior:
 - `offset-x` and `offset-y` pan the transformed image in guide-space pixels.
 - `rotation-deg` rotates the source in the 2D plane.
 - `scale` is uniform image zoom.
-- When enabled, export only the selected block as a single-page PDF.
-- If selected block coordinates are outside the resolved grid, fail with a clear error.
+- When enabled, export all selected blocks as pages of one PDF. A single selected block produces one page.
+- Sort selected blocks top-to-bottom then left-to-right and ignore duplicate coordinates.
+- If any selected block is outside the resolved grid, fail with a clear error. An empty selection is invalid.
 - Transform mode is compatible with preset grids, custom grids, and expand-to-format. Expand pre-crop is applied before transform rendering.
 
 ### 3.4 Backend Requirement
@@ -83,7 +85,7 @@ Behavior:
 5. Compute vertical/horizontal guide positions at cut lines.
 6. Generate tile crop rectangles from the guide grid.
 7. If transform-cut mode is disabled, export all tiles into one multi-page PDF with deterministic page ordering.
-8. If transform-cut mode is enabled, render the transformed source underneath the fixed guide frame and export only the selected block.
+8. If transform-cut mode is enabled, render each selected block from the transformed source underneath the fixed guide frame and export those pages in row-major order.
 
 ### 4.1.1 Expand-to-Format Crop Math
 - Determine working target ratio from source orientation:
@@ -153,6 +155,10 @@ Transform-cut naming:
 
 `<input-stem>-guidecut-<target-or-grid-token>-block-<col>-<row>-<YYYYMMDD-HHMMSS>.pdf`
 
+For multiple selected blocks:
+
+`<input-stem>-guidecut-<target-or-grid-token>-blocks-<count>-<YYYYMMDD-HHMMSS>.pdf`
+
 Requirements:
 - Datetime uses local system timezone.
 - Datetime string must be filesystem-safe (no colons or spaces).
@@ -168,7 +174,7 @@ Example for `a2` (2x2) page sequence:
 
 ### 4.5 Export Requirements
 - Export one multi-page PDF containing every tile as one page.
-- In transform-cut mode, export a single-page PDF containing only the selected block.
+- In transform-cut mode, export one PDF page per selected block, in row-major order.
 - Preserve color profile and metadata in export when the active backend/PDF path supports it.
 - If full metadata preservation is not possible for a given input/export path, emit a warning but continue.
 
@@ -182,6 +188,7 @@ Hard failures (non-zero exit):
 - Invalid `--expand-bias-percent` value (outside `[0,100]` or non-numeric).
 - Invalid transform numeric value.
 - Invalid selected transform block coordinate for resolved grid.
+- Mixing repeated `--block` with legacy `--block-col` / `--block-row`.
 - Output file path cannot be created/written.
 - Export failure for any page or final combined PDF write.
 
@@ -201,11 +208,13 @@ Soft warnings (continue):
 9. `compute_expand_crop_rect(width_px: int, height_px: int, bias_percent: float|int) -> ExpandCrop`
 10. `resolve_grid_selection(target_format, grid_cols, grid_rows) -> GridSelection`
 11. `build_output_path(input_path: str, target_token: str, now_local: datetime) -> output_pdf_path`
-12. `export_tiles_to_multipage_pdf(image, ordered_rects, output_path, preserve_profile=True, preserve_metadata=True) -> None`
+12. `export_tiles_to_multipage_pdf(image, ordered_rects, output_path, preserve_profile=True, preserve_metadata=True, transform_options=None) -> None`
 13. `parse_transform_scale(value) -> float`
 14. `validate_selected_block(block_col, block_row, cols, rows) -> None`
 15. `render_transformed_source(image, transform_options) -> Image`
 16. `selected_block_output_token(base_token, block_col, block_row) -> str`
+17. `ordered_selected_blocks(blocks, cols, rows) -> list[(col, row)]`
+18. `selected_blocks_output_token(base_token, blocks) -> str`
 
 ## 7. Non-Functional Requirements
 - Deterministic output naming and page ordering.
@@ -223,8 +232,8 @@ Soft warnings (continue):
 7. When expand mode is enabled, crop occurs before guide/grid computation and output geometry reflects cropped dimensions.
 8. Expand bias endpoints are correct (`0%` left/top anchored, `100%` right/bottom anchored).
 9. Custom grid mode produces exactly `cols*rows` pages and guide counts (`cols-1`, `rows-1`).
-10. Transform-cut mode exports exactly one selected block page.
-11. Transform-cut output names include `block-<col>-<row>`.
+10. Transform-cut mode exports exactly one page per selected block in row-major order.
+11. Single-block names include `block-<col>-<row>`; multi-block names include `blocks-<count>`.
 12. Transform-cut mode leaves default multi-page output unchanged when disabled.
 
 ## 9. Test Plan
@@ -241,6 +250,7 @@ Soft warnings (continue):
 - Custom grid mode selection/validation and conflict handling
 - Custom output token naming (`grid-CxR`)
 - Transform-cut numeric parsing, output token naming, and selected block validation
+- Multi-block parsing, deduplication, and row-major ordering
 - Transform renderer keeps output canvas dimensions stable
 
 ### 9.2 Integration Tests
@@ -251,7 +261,7 @@ Soft warnings (continue):
 - Verify metadata/profile preservation path on supported sample files
 - Verify expand-on run uses cropped working geometry for tile/page boundaries
 - Verify expand-off run behavior remains unchanged from baseline
-- Verify transform-cut run exports exactly one page/rect for selected block
+- Verify transform-cut run exports one page per selected block in row-major order
 - Verify transform-cut invalid block coordinate fails
 
 ### 9.3 Regression Tests

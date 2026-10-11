@@ -67,7 +67,13 @@ Optional transform-cut mode:
 python iso216-guidecut/cli/iso216_guidecut.py C:\path\poster.png a2 --transform-cut --block-col 1 --block-row 0
 ```
 
-Transform-cut mode keeps the guide grid fixed, transforms the source image underneath it, and exports only the selected zero-based guide block as a single-page PDF.
+Transform-cut mode keeps the guide grid fixed, transforms the source image underneath it, and exports the selected zero-based guide blocks as pages in one PDF.
+
+To export multiple blocks, repeat `--block COL,ROW`; page order is top-to-bottom, then left-to-right, regardless of argument order. The older `--block-col` / `--block-row` flags remain available for one block, but cannot be combined with `--block`.
+
+```powershell
+python iso216-guidecut/cli/iso216_guidecut.py C:\path\poster.png a2 --transform-cut --block 1,1 --block 0,0
+```
 
 Transform options:
 ```powershell
@@ -79,6 +85,7 @@ Transform semantics:
 - `--transform-rotation-deg`: rotate the source image around its center.
 - `--transform-scale`: uniform zoom factor; must be greater than `0`.
 - `--block-col` / `--block-row`: selected guide block, zero-based from top-left.
+- `--block COL,ROW`: repeatable selected guide block, zero-based from top-left.
 
 ### UI
 Launch the desktop UI:
@@ -103,9 +110,10 @@ UI interactions in current pass:
 - `Open Folder` resolves to explicit output directory when enabled and set, otherwise resolves from input path (file parent or folder path).
 - `Expand to Format` toggle enables pre-crop to ISO ratio before guides/tiles are computed.
 - Expand bias slider (`0..100`) appears only when expand mode is on; slider is disabled when source has no excess trim axis.
-- `Transform Cut` toggle reveals source transform controls (`X`, `Y`, `Rot`, `Scale`) and selected block controls (`Col`, `Row`).
-- With transform mode enabled, preview keeps guides fixed, transforms the source image underneath, highlights the selected block, and clicking a preview block updates `Col`/`Row`.
-- With transform mode enabled, `Run` exports only the selected block as a single-page PDF.
+- `Transform Cut` toggle reveals source transform controls (`X`, `Y`, `Rot`, `Scale`), active block controls (`Col`, `Row`), `Reset`, and `Select All`.
+- With transform mode enabled, preview keeps guides fixed and transforms the source image underneath. Click a block to select only it; Ctrl+click a block to add or remove it without clearing other selections. `Select All` selects every block. Editing `Col`/`Row` selects that single block.
+- In transform mode, left drag pans the image in the pointer's direction, right drag rotates (right/down clockwise), and the mouse wheel zooms (up/in, down/out). A left click without dragging still selects a block. Pan takes priority over expand-bias dragging while transform mode is enabled.
+- With transform mode enabled, `Run` exports the selected blocks as pages in one PDF. Deselecting every block prevents a run until at least one is selected.
 - `Run` executes in a background thread and streams stdout/stderr to the status panel.
 - Post-run input behavior keeps only the source folder path (filename cleared) to speed up selecting the next file.
 - Post-run expand behavior resets to defaults (`Expand to Format` off, bias `50%`).
@@ -144,5 +152,7 @@ Custom mode:
   - `<input-stem>-guidecut-grid-<cols>x<rows>-<YYYYMMDD-HHMMSS>.pdf`
 - Transform-cut outputs append the selected block coordinate:
   - `<input-stem>-guidecut-<target-or-grid>-block-<col>-<row>-<YYYYMMDD-HHMMSS>.pdf`
+- Multi-block transform outputs append the number of selected blocks:
+  - `<input-stem>-guidecut-<target-or-grid>-blocks-<count>-<YYYYMMDD-HHMMSS>.pdf`
 - Page order is top-to-bottom, left-to-right.
 - If a timestamped output filename already exists, appends `-1`, `-2`, etc.

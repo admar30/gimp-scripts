@@ -30,6 +30,8 @@ from guidecut_runner import (
     load_ui_state,
     normalize_target_format,
     open_folder,
+    ordered_selected_blocks,
+    pan_offsets_from_preview_drag,
     parse_transform_cut_options,
     preset_grid_for_orientation,
     preview_block_for_point,
@@ -40,9 +42,11 @@ from guidecut_runner import (
     resolve_existing_input_file,
     resolve_open_folder,
     resolve_output_directory,
+    rotation_from_preview_drag,
     run_command_streaming,
     sample_line_luminance,
     save_ui_state,
+    scale_from_preview_scroll,
     scaled_preview_crop_box,
     scale_transform_for_preview,
     selected_block_rect_for_grid,
@@ -469,6 +473,8 @@ class GuidecutApp(tk.Tk):
         self.transform_scale_var = tk.StringVar(value="1")
         self.transform_block_col_var = tk.StringVar(value="0")
         self.transform_block_row_var = tk.StringVar(value="0")
+        self._selected_transform_blocks: set[tuple[int, int]] = {(0, 0)}
+        self._updating_transform_selection_fields = False
 
         self._event_queue: queue.Queue[tuple[str, object]] = queue.Queue()
         self._run_thread: threading.Thread | None = None
@@ -504,7 +510,15 @@ class GuidecutApp(tk.Tk):
         self._expand_drag_display_length = 0
         self._last_preview_crop_info = None
         self._last_preview_display_box = (0, 0, 0, 0)
+        self._last_preview_working_size = (0, 0)
         self._last_preview_grid = (1, 1)
+        self._transform_drag_mode: str | None = None
+        self._transform_drag_start_point = (0, 0)
+        self._transform_drag_start_options: TransformCutUiOptions | None = None
+        self._transform_drag_display_size = (0, 0)
+        self._transform_drag_working_size = (0, 0)
+        self._transform_drag_moved = False
+        self._updating_transform_vars = False
 
         self._style = apply_ttk_theme(self)
         self._load_persisted_state()
@@ -518,10 +532,10 @@ class GuidecutApp(tk.Tk):
             self.transform_offset_y_var,
             self.transform_rotation_var,
             self.transform_scale_var,
-            self.transform_block_col_var,
-            self.transform_block_row_var,
         ):
             transform_var.trace_add("write", self._on_transform_value_changed)
+        self.transform_block_col_var.trace_add("write", self._on_transform_block_fields_changed)
+        self.transform_block_row_var.trace_add("write", self._on_transform_block_fields_changed)
         self._toggle_output_controls()
         self._toggle_expand_controls()
         self._toggle_custom_grid_controls()
@@ -761,7 +775,7 @@ class GuidecutApp(tk.Tk):
 
         self.transform_row = ttk.Frame(panel, style="Panel.TFrame")
         self.transform_row.grid(row=7, column=1, columnspan=2, sticky="ew", pady=(0, SPACING["sm"]))
-        for column_index in range(13):
+        for column_index in range(14):
             self.transform_row.columnconfigure(column_index, weight=1 if column_index % 2 else 0)
 
         transform_fields = [
@@ -783,7 +797,7 @@ class GuidecutApp(tk.Tk):
             entry = tk.Entry(
                 self.transform_row,
                 textvariable=variable,
-                width=7,
+                width=4 if label in {"Col", "Row"} else 7,
                 bg=COLORS["bg.input"],
                 fg=COLORS["text.primary"],
                 insertbackground=COLORS["text.primary"],
@@ -805,9 +819,18 @@ class GuidecutApp(tk.Tk):
             command=self._reset_transform_state,
             variant="secondary",
             radius=RADIUS["sm"],
-            min_width=72,
+            min_width=60,
         )
         self.transform_reset_button.grid(row=0, column=12, padx=(SPACING["xs"], 0))
+        self.transform_select_all_button = RoundedButton(
+            self.transform_row,
+            text="Select All",
+            command=self._select_all_transform_blocks,
+            variant="secondary",
+            radius=RADIUS["sm"],
+            min_width=78,
+        )
+        self.transform_select_all_button.grid(row=0, column=13, padx=(SPACING["xs"], 0))
         self.transform_row.grid_remove()
 
         button_row = ttk.Frame(panel, style="Panel.TFrame")
@@ -931,6 +954,13 @@ class GuidecutApp(tk.Tk):
         self.preview_canvas.bind("<ButtonPress-1>", self._on_preview_drag_start, add=True)
         self.preview_canvas.bind("<B1-Motion>", self._on_preview_drag_motion, add=True)
         self.preview_canvas.bind("<ButtonRelease-1>", self._on_preview_drag_end, add=True)
+        self.preview_canvas.bind("<ButtonPress-3>", self._on_preview_rotate_start, add=True)
+        self.preview_canvas.bind("<B3-Motion>", self._on_preview_rotate_motion, add=True)
+        self.preview_canvas.bind("<ButtonRelease-3>", self._on_preview_rotate_end, add=True)
+        self.preview_canvas.bind("<ButtonPress-2>", self._on_preview_control_middle_click, add=True)
+        self.preview_canvas.bind("<MouseWheel>", self._on_preview_mouse_wheel, add=True)
+        self.preview_canvas.bind("<Button-4>", self._on_preview_scroll_up, add=True)
+        self.preview_canvas.bind("<Button-5>", self._on_preview_scroll_down, add=True)
 
         self.preview_status_var = tk.StringVar(value="Preview hidden.")
         ttk.Label(
@@ -967,8 +997,10 @@ class GuidecutApp(tk.Tk):
         self._preview_tk_image = None
         self._last_preview_crop_info = None
         self._last_preview_display_box = (0, 0, 0, 0)
+        self._last_preview_working_size = (0, 0)
         self._last_preview_grid = (1, 1)
         self._expand_drag_active = False
+        self._clear_transform_drag()
 
     def _cancel_contrast_refresh(self) -> None:
         if self._preview_contrast_after_id is None:
@@ -1086,14 +1118,14 @@ class GuidecutApp(tk.Tk):
         if not self.custom_grid_var.get():
             self._custom_grid_initialized = False
         self.info_tooltip.refresh()
-        self._clamp_transform_block_to_current_grid()
+        self._clamp_transform_block_to_current_grid(rerender=False)
         if self.show_preview_var.get() and self._preview_source_image is not None:
             self._invalidate_guide_style_cache()
             self._render_preview(compute_contrast=True)
 
     def _on_custom_grid_value_changed(self, *_args) -> None:
         self.info_tooltip.refresh()
-        self._clamp_transform_block_to_current_grid()
+        self._clamp_transform_block_to_current_grid(rerender=False)
         if self.custom_grid_var.get() and self.show_preview_var.get() and self._preview_source_image is not None:
             self._invalidate_guide_style_cache()
             self._render_preview(compute_contrast=False)
@@ -1173,7 +1205,7 @@ class GuidecutApp(tk.Tk):
             self._initialize_custom_grid_from_target()
         self._toggle_custom_grid_controls()
         self.info_tooltip.refresh()
-        self._clamp_transform_block_to_current_grid()
+        self._clamp_transform_block_to_current_grid(rerender=False)
         if self._preview_panel_visible and self._preview_source_image is not None:
             self._invalidate_guide_style_cache()
             self._render_preview(compute_contrast=False)
@@ -1181,9 +1213,11 @@ class GuidecutApp(tk.Tk):
 
     def _on_transform_toggle(self) -> None:
         self._toggle_transform_controls()
+        self._clear_transform_drag()
+        self.preview_canvas.configure(cursor="fleur" if self.transform_cut_var.get() else "arrow")
         if not self.transform_cut_var.get():
             self._close_preview_transform_cache()
-        self._clamp_transform_block_to_current_grid()
+        self._clamp_transform_block_to_current_grid(rerender=False)
         if self._preview_panel_visible and self._preview_source_image is not None:
             self._invalidate_guide_style_cache()
             self._render_preview(compute_contrast=False)
@@ -1196,24 +1230,120 @@ class GuidecutApp(tk.Tk):
             self.transform_row.grid_remove()
 
     def _reset_transform_state(self) -> None:
-        self.transform_offset_x_var.set("0")
-        self.transform_offset_y_var.set("0")
-        self.transform_rotation_var.set("0")
-        self.transform_scale_var.set("1")
-        self.transform_block_col_var.set("0")
-        self.transform_block_row_var.set("0")
+        self._updating_transform_vars = True
+        self._updating_transform_selection_fields = True
+        try:
+            self.transform_offset_x_var.set("0")
+            self.transform_offset_y_var.set("0")
+            self.transform_rotation_var.set("0")
+            self.transform_scale_var.set("1")
+            self.transform_block_col_var.set("0")
+            self.transform_block_row_var.set("0")
+            self._selected_transform_blocks = {(0, 0)}
+        finally:
+            self._updating_transform_vars = False
+            self._updating_transform_selection_fields = False
         if self._preview_panel_visible and self._preview_source_image is not None:
             self._invalidate_guide_style_cache()
             self._render_preview(compute_contrast=False)
             self._schedule_contrast_refresh()
 
+    def _current_transform_grid(self) -> tuple[int, int] | None:
+        if self.custom_grid_var.get():
+            return self._active_custom_grid_values(strict=False)
+        try:
+            target = normalize_target_format(self.target_var.get())
+        except ValueError:
+            return None
+        return preset_grid_for_orientation(target, self._current_source_orientation() or "portrait")
+
+    def _set_transform_selection(
+        self,
+        blocks: set[tuple[int, int]],
+        *,
+        active: tuple[int, int] | None = None,
+        rerender: bool = True,
+    ) -> None:
+        changed = blocks != self._selected_transform_blocks
+        self._selected_transform_blocks = set(blocks)
+        if active is None and blocks:
+            try:
+                current = (int(self.transform_block_col_var.get()), int(self.transform_block_row_var.get()))
+            except ValueError:
+                current = None
+            active = current if current in blocks else min(blocks, key=lambda block: (block[1], block[0]))
+        if active is not None:
+            self._updating_transform_selection_fields = True
+            try:
+                self.transform_block_col_var.set(str(active[0]))
+                self.transform_block_row_var.set(str(active[1]))
+            finally:
+                self._updating_transform_selection_fields = False
+        if changed and rerender and self._preview_panel_visible and self._preview_source_image is not None:
+            self._render_preview(compute_contrast=False)
+
+    def _on_transform_block_fields_changed(self, *_args) -> None:
+        if not self.transform_cut_var.get() or self._updating_transform_selection_fields:
+            return
+        try:
+            block = (int(self.transform_block_col_var.get()), int(self.transform_block_row_var.get()))
+        except ValueError:
+            return
+        grid = self._current_transform_grid()
+        if grid is None or not (0 <= block[0] < grid[0] and 0 <= block[1] < grid[1]):
+            return
+        self._set_transform_selection({block}, active=block)
+
+    def _select_all_transform_blocks(self) -> None:
+        grid = self._current_transform_grid()
+        if grid is None:
+            self._append_status("Enter valid custom grid dimensions before selecting all blocks.", error=True)
+            return
+        cols, rows = grid
+        self._set_transform_selection({(col, row) for row in range(rows) for col in range(cols)})
+
     def _on_transform_value_changed(self, *_args) -> None:
-        if not self.transform_cut_var.get():
+        if not self.transform_cut_var.get() or self._updating_transform_vars:
             return
         if self._preview_panel_visible and self._preview_source_image is not None:
             self._invalidate_guide_style_cache()
             self._render_preview(compute_contrast=False)
             self._schedule_contrast_refresh()
+
+    def _set_transform_control_values(
+        self,
+        *,
+        offset_x: float | None = None,
+        offset_y: float | None = None,
+        rotation: float | None = None,
+        scale: float | None = None,
+    ) -> None:
+        updates = (
+            (self.transform_offset_x_var, offset_x),
+            (self.transform_offset_y_var, offset_y),
+            (self.transform_rotation_var, rotation),
+            (self.transform_scale_var, scale),
+        )
+        changed = False
+        self._updating_transform_vars = True
+        try:
+            for variable, value in updates:
+                if value is None:
+                    continue
+                text = (
+                    f"{value:.10g}"
+                    if variable is self.transform_scale_var
+                    else f"{value:.3f}".rstrip("0").rstrip(".")
+                )
+                if text == "-0":
+                    text = "0"
+                if variable.get() != text:
+                    variable.set(text)
+                    changed = True
+        finally:
+            self._updating_transform_vars = False
+        if changed:
+            self._on_transform_value_changed()
 
     def _current_transform_options(self, *, strict: bool) -> TransformCutUiOptions:
         try:
@@ -1239,24 +1369,17 @@ class GuidecutApp(tk.Tk):
                 block_row=0,
             )
 
-    def _clamp_transform_block_to_current_grid(self) -> None:
+    def _clamp_transform_block_to_current_grid(self, *, rerender: bool = True) -> None:
         if not self.transform_cut_var.get():
             return
-        cols, rows = self._last_preview_grid
-        try:
-            current_col = int(self.transform_block_col_var.get())
-        except ValueError:
-            current_col = 0
-        try:
-            current_row = int(self.transform_block_row_var.get())
-        except ValueError:
-            current_row = 0
-        clamped_col = max(0, min(max(0, cols - 1), current_col))
-        clamped_row = max(0, min(max(0, rows - 1), current_row))
-        if str(clamped_col) != self.transform_block_col_var.get():
-            self.transform_block_col_var.set(str(clamped_col))
-        if str(clamped_row) != self.transform_block_row_var.get():
-            self.transform_block_row_var.set(str(clamped_row))
+        grid = self._current_transform_grid()
+        if grid is None:
+            return
+        cols, rows = grid
+        valid = {(col, row) for col, row in self._selected_transform_blocks if col < cols and row < rows}
+        if self._selected_transform_blocks and not valid:
+            valid = {(0, 0)}
+        self._set_transform_selection(valid, rerender=rerender)
 
     def _on_expand_toggle(self) -> None:
         self._toggle_expand_controls()
@@ -1463,6 +1586,7 @@ class GuidecutApp(tk.Tk):
         self._preview_source_size = tuple(payload["size"])
         self._preview_source_path = loaded_path
         self._preview_autofit_pending = True
+        self._clamp_transform_block_to_current_grid(rerender=False)
         self._invalidate_guide_style_cache()
         self._update_expand_slider_state()
         self._render_preview(compute_contrast=True)
@@ -1493,10 +1617,40 @@ class GuidecutApp(tk.Tk):
             and crop_info.excess_px > 0
         )
 
+    def _preview_point_in_image(self, event: tk.Event) -> bool:
+        offset_x, offset_y, display_w, display_h = self._last_preview_display_box
+        return (
+            self._preview_panel_visible
+            and self._preview_source_image is not None
+            and display_w > 0
+            and display_h > 0
+            and offset_x <= event.x <= offset_x + display_w
+            and offset_y <= event.y <= offset_y + display_h
+        )
+
+    def _clear_transform_drag(self) -> None:
+        self._transform_drag_mode = None
+        self._transform_drag_start_options = None
+        self._transform_drag_moved = False
+
+    def _start_transform_drag(self, mode: str, event: tk.Event) -> None:
+        self._clear_transform_drag()
+        if not self.transform_cut_var.get() or not self._preview_point_in_image(event):
+            return
+        try:
+            options = self._current_transform_options(strict=True)
+        except ValueError:
+            return
+        self._transform_drag_mode = mode
+        self._transform_drag_start_point = (event.x, event.y)
+        self._transform_drag_start_options = options
+        self._transform_drag_display_size = self._last_preview_display_box[2:]
+        self._transform_drag_working_size = self._last_preview_working_size
+
     def _on_preview_drag_start(self, event: tk.Event) -> None:
         if self.transform_cut_var.get():
-            self._select_transform_block_from_preview(event)
             self._expand_drag_active = False
+            self._start_transform_drag("move", event)
             return
 
         if not self._preview_drag_is_available():
@@ -1521,6 +1675,24 @@ class GuidecutApp(tk.Tk):
         self._expand_drag_display_length = max(1, int(display_w if crop_info.axis == "x" else display_h))
 
     def _on_preview_drag_motion(self, event: tk.Event) -> None:
+        if self._transform_drag_mode == "move" and self._transform_drag_start_options is not None:
+            delta_x = event.x - self._transform_drag_start_point[0]
+            delta_y = event.y - self._transform_drag_start_point[1]
+            if not self._transform_drag_moved and max(abs(delta_x), abs(delta_y)) < 3:
+                return
+            self._transform_drag_moved = True
+            offset_x, offset_y = pan_offsets_from_preview_drag(
+                (
+                    self._transform_drag_start_options.offset_x_px,
+                    self._transform_drag_start_options.offset_y_px,
+                ),
+                (delta_x, delta_y),
+                self._transform_drag_display_size,
+                self._transform_drag_working_size,
+            )
+            self._set_transform_control_values(offset_x=offset_x, offset_y=offset_y)
+            return
+
         if not self._expand_drag_active or self._expand_drag_axis not in {"x", "y"}:
             return
         if self._expand_drag_excess <= 0 or self._expand_drag_display_length <= 0:
@@ -1534,9 +1706,59 @@ class GuidecutApp(tk.Tk):
         new_bias = (leading_trim / self._expand_drag_excess) * 100.0
         self._set_expand_bias_percent(new_bias, rerender=True, fast_preview=True)
 
-    def _on_preview_drag_end(self, _event: tk.Event) -> None:
+    def _on_preview_drag_end(self, event: tk.Event) -> None:
+        if self._transform_drag_mode == "move" and not self._transform_drag_moved:
+            self._select_transform_block_from_preview(event)
+        self._clear_transform_drag()
         self._expand_drag_active = False
         self._expand_drag_axis = None
+
+    def _on_preview_rotate_start(self, event: tk.Event) -> None:
+        if self.transform_cut_var.get() and getattr(event, "state", 0) & 0x0004:
+            self._select_transform_block_from_preview(event)
+            return
+        self._start_transform_drag("rotate", event)
+
+    def _on_preview_control_middle_click(self, event: tk.Event) -> None:
+        if self.transform_cut_var.get() and getattr(event, "state", 0) & 0x0004:
+            self._select_transform_block_from_preview(event)
+
+    def _on_preview_rotate_motion(self, event: tk.Event) -> None:
+        if self._transform_drag_mode != "rotate" or self._transform_drag_start_options is None:
+            return
+        delta = (
+            event.x - self._transform_drag_start_point[0],
+            event.y - self._transform_drag_start_point[1],
+        )
+        rotation = rotation_from_preview_drag(self._transform_drag_start_options.rotation_deg, delta)
+        self._set_transform_control_values(rotation=rotation)
+
+    def _on_preview_rotate_end(self, _event: tk.Event) -> None:
+        if self._transform_drag_mode == "rotate":
+            self._clear_transform_drag()
+
+    def _change_preview_scale(self, event: tk.Event, steps: float) -> str | None:
+        if not self.transform_cut_var.get() or not self._preview_point_in_image(event):
+            return None
+        try:
+            options = self._current_transform_options(strict=True)
+        except ValueError:
+            return "break"
+        self._set_transform_control_values(scale=scale_from_preview_scroll(options.scale, steps))
+        return "break"
+
+    def _on_preview_mouse_wheel(self, event: tk.Event) -> str | None:
+        delta = float(event.delta)
+        if delta == 0:
+            return None
+        steps = delta / 120.0 if abs(delta) >= 120 else delta
+        return self._change_preview_scale(event, steps)
+
+    def _on_preview_scroll_up(self, event: tk.Event) -> str | None:
+        return self._change_preview_scale(event, 1)
+
+    def _on_preview_scroll_down(self, event: tk.Event) -> str | None:
+        return self._change_preview_scale(event, -1)
 
     def _select_transform_block_from_preview(self, event: tk.Event) -> None:
         offset_x, offset_y, display_w, display_h = self._last_preview_display_box
@@ -1553,9 +1775,16 @@ class GuidecutApp(tk.Tk):
         )
         if block is None:
             return
-        col, row = block
-        self.transform_block_col_var.set(str(col))
-        self.transform_block_row_var.set(str(row))
+        if getattr(event, "state", 0) & 0x0004:
+            selected = set(self._selected_transform_blocks)
+            if block in selected:
+                selected.remove(block)
+                self._set_transform_selection(selected)
+            else:
+                selected.add(block)
+                self._set_transform_selection(selected, active=block)
+        else:
+            self._set_transform_selection({block}, active=block)
 
     def _on_splitter_press(self, event: tk.Event) -> None:
         if not self._preview_panel_visible:
@@ -1665,6 +1894,7 @@ class GuidecutApp(tk.Tk):
         self.preview_canvas.delete("all")
         self.preview_canvas.create_image(offset_x, offset_y, anchor="nw", image=self._preview_tk_image)
         self._last_preview_display_box = (offset_x, offset_y, display_w, display_h)
+        self._last_preview_working_size = (working_w, working_h)
         self._last_preview_crop_info = crop_info
 
         custom_grid = self._active_custom_grid_values(strict=False)
@@ -1714,7 +1944,12 @@ class GuidecutApp(tk.Tk):
             display_h,
             crop_info.rect.box if crop_info is not None else None,
             crop_info.excess_px if crop_info is not None else 0,
-            transform_options if transform_options.enabled else None,
+            (
+                transform_options.offset_x_px,
+                transform_options.offset_y_px,
+                transform_options.rotation_deg,
+                transform_options.scale,
+            ) if transform_options.enabled else None,
             tuple(sample_segments),
         )
         guide_styles: list[tuple[str, str | None]] = [default_style] * len(guide_segments)
@@ -1770,19 +2005,12 @@ class GuidecutApp(tk.Tk):
             )
 
         if transform_options.enabled:
-            selected_rect = None
-            try:
+            for block_col, block_row in sorted(self._selected_transform_blocks, key=lambda block: (block[1], block[0])):
+                if not (0 <= block_col < cols and 0 <= block_row < rows):
+                    continue
                 selected_rect = selected_block_rect_for_grid(
-                    transform_options.block_col,
-                    transform_options.block_row,
-                    cols,
-                    rows,
-                    working_w,
-                    working_h,
+                    block_col, block_row, cols, rows, working_w, working_h
                 )
-            except ValueError:
-                selected_rect = None
-            if selected_rect is not None:
                 sx0 = offset_x + (selected_rect.x0 * ratio_x)
                 sy0 = offset_y + (selected_rect.y0 * ratio_y)
                 sx1 = offset_x + (selected_rect.x1 * ratio_x)
@@ -1793,16 +2021,9 @@ class GuidecutApp(tk.Tk):
                     sx1,
                     sy1,
                     fill=COLORS["action.primary"],
-                    outline="",
-                    stipple="gray25",
-                )
-                self.preview_canvas.create_rectangle(
-                    sx0,
-                    sy0,
-                    sx1,
-                    sy1,
                     outline=COLORS["border.focus"],
                     width=3,
+                    stipple="gray25",
                 )
 
         self.preview_canvas.create_rectangle(
@@ -1822,9 +2043,10 @@ class GuidecutApp(tk.Tk):
             status_text += f" | Expanded trim {crop_info.excess_px}px ({axis})"
         if transform_options.enabled:
             status_text += (
-                f" | Transform block {transform_options.block_col},{transform_options.block_row} "
-                f"| rot {transform_options.rotation_deg:.1f}deg scale {transform_options.scale:.3g}"
+                f" | Selected {len(self._selected_transform_blocks)}/{cols * rows} blocks"
+                f" | rot {transform_options.rotation_deg:.1f}deg scale {transform_options.scale:.3g}"
             )
+            status_text += " | Click: one; Ctrl+click: toggle; drag: move; right-drag: rotate; wheel: zoom"
         self._set_preview_status(status_text)
         if owns_working_image:
             working_image.close()
@@ -1956,7 +2178,10 @@ class GuidecutApp(tk.Tk):
 
     def _resolve_run_inputs(
         self,
-    ) -> tuple[Path, str | None, Path | None, bool, float, int | None, int | None, TransformCutUiOptions]:
+    ) -> tuple[
+        Path, str | None, Path | None, bool, float, int | None, int | None,
+        TransformCutUiOptions, tuple[tuple[int, int], ...] | None,
+    ]:
         self._clear_validation()
 
         if not SCRIPT_PATH.exists():
@@ -1989,9 +2214,18 @@ class GuidecutApp(tk.Tk):
         expand_enabled = bool(self.expand_to_format_var.get())
         expand_bias = clamp_expand_bias_percent(self.expand_bias_var.get(), default=EXPAND_DEFAULT_BIAS_PERCENT)
         transform_options = self._current_transform_options(strict=True)
+        transform_blocks = None
+        if transform_options.enabled:
+            grid = self._current_transform_grid()
+            if grid is None:
+                raise ValueError("Select a valid grid before running transform cut.")
+            transform_blocks = tuple(ordered_selected_blocks(self._selected_transform_blocks, *grid))
 
         if not self.specify_output_var.get():
-            return input_path, target, None, expand_enabled, expand_bias, custom_cols, custom_rows, transform_options
+            return (
+                input_path, target, None, expand_enabled, expand_bias,
+                custom_cols, custom_rows, transform_options, transform_blocks,
+            )
 
         output_dir = resolve_output_directory(
             input_path=input_path,
@@ -2013,8 +2247,12 @@ class GuidecutApp(tk.Tk):
             transform_cut=transform_options.enabled,
             transform_block_col=transform_options.block_col,
             transform_block_row=transform_options.block_row,
+            transform_blocks=transform_blocks,
         )
-        return input_path, target, output_pdf, expand_enabled, expand_bias, custom_cols, custom_rows, transform_options
+        return (
+            input_path, target, output_pdf, expand_enabled, expand_bias,
+            custom_cols, custom_rows, transform_options, transform_blocks,
+        )
 
     def _run(self) -> None:
         if self._run_thread and self._run_thread.is_alive():
@@ -2031,6 +2269,7 @@ class GuidecutApp(tk.Tk):
                 custom_cols,
                 custom_rows,
                 transform_options,
+                transform_blocks,
             ) = self._resolve_run_inputs()
         except ValueError as exc:
             self._append_status(str(exc), error=True)
@@ -2053,6 +2292,7 @@ class GuidecutApp(tk.Tk):
             transform_scale=transform_options.scale,
             transform_block_col=transform_options.block_col,
             transform_block_row=transform_options.block_row,
+            transform_blocks=transform_blocks,
         )
         self._last_run_input_path = input_path
 
@@ -2073,7 +2313,7 @@ class GuidecutApp(tk.Tk):
                 f"offset=({transform_options.offset_x_px:.1f}, {transform_options.offset_y_px:.1f})px, "
                 f"rotation={transform_options.rotation_deg:.1f}deg, "
                 f"scale={transform_options.scale:.3g}, "
-                f"block={transform_options.block_col},{transform_options.block_row}."
+                f"selected blocks={len(transform_blocks or ())}."
             )
 
         self.run_button.state(["disabled"])

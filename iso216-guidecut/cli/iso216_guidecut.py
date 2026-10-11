@@ -211,6 +211,15 @@ def selected_block_output_token(base_token: str, block_col: int, block_row: int)
     return f"{base_token}-block-{block_col}-{block_row}"
 
 
+def selected_blocks_output_token(base_token: str, blocks: Sequence[tuple[int, int]]) -> str:
+    unique_blocks = set(blocks)
+    if not unique_blocks:
+        raise ValueError("Select at least one block for transform cut.")
+    if len(unique_blocks) == 1:
+        return selected_block_output_token(base_token, *next(iter(unique_blocks)))
+    return f"{base_token}-blocks-{len(unique_blocks)}"
+
+
 def is_near_iso216_ratio(width_px: int, height_px: int, tolerance: float = 0.03) -> bool:
     if width_px <= 0 or height_px <= 0:
         return False
@@ -263,11 +272,29 @@ def parse_block_index(value: int | str, field_name: str) -> int:
     return parsed
 
 
+def parse_block_coordinate(value: str) -> tuple[int, int]:
+    parts = value.split(",")
+    if len(parts) != 2:
+        raise ValueError(f"Block must be COL,ROW with zero-based integers, got '{value}'.")
+    return parse_block_index(parts[0], "Block column"), parse_block_index(parts[1], "Block row")
+
+
 def validate_selected_block(block_col: int, block_row: int, cols: int, rows: int) -> None:
     if not (0 <= block_col < cols):
         raise ValueError(f"Selected block column must be in [0, {cols - 1}], got {block_col}.")
     if not (0 <= block_row < rows):
         raise ValueError(f"Selected block row must be in [0, {rows - 1}], got {block_row}.")
+
+
+def ordered_selected_blocks(
+    blocks: Iterable[tuple[int, int]], cols: int, rows: int
+) -> list[tuple[int, int]]:
+    selected = set(blocks)
+    if not selected:
+        raise ValueError("Select at least one block for transform cut.")
+    for col, row in selected:
+        validate_selected_block(col, row, cols, rows)
+    return [block for block in ordered_tiles(cols, rows) if block in selected]
 
 
 def _has_alpha(image: Image.Image) -> bool:
@@ -486,6 +513,7 @@ def export_tiles_to_multipage_pdf(
     output_path: Path,
     preserve_profile: bool = True,
     preserve_metadata: bool = True,
+    transform_options: TransformCutOptions | None = None,
 ) -> list[str]:
     if not ordered_rects:
         raise ValueError("No tile rectangles provided for export.")
@@ -495,9 +523,23 @@ def export_tiles_to_multipage_pdf(
     pages: list[Image.Image] = []
     warnings: list[str] = []
 
-    for rect in ordered_rects:
-        cropped = image.crop(rect.box)
-        pages.append(_normalize_for_pdf(cropped, page_mode))
+    try:
+        for rect in ordered_rects:
+            cropped = (
+                render_transformed_tile(image, transform_options, rect)
+                if transform_options is not None
+                else image.crop(rect.box)
+            )
+            try:
+                page = _normalize_for_pdf(cropped, page_mode)
+            finally:
+                if cropped.mode != page_mode:
+                    cropped.close()
+            pages.append(page)
+    except Exception:
+        for page in pages:
+            page.close()
+        raise
 
     dpi = info.get("dpi")
     resolution = None
@@ -613,7 +655,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--transform-cut",
         action="store_true",
-        help="Transform the source under a fixed guide grid and export one selected block.",
+        help="Transform the source under a fixed guide grid and export selected blocks.",
     )
     parser.add_argument(
         "--transform-offset-x",
@@ -642,14 +684,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--block-col",
         type=int,
-        default=DEFAULT_TRANSFORM_BLOCK_COL,
+        default=None,
         help="Transform-cut selected block column, zero-based from the left.",
     )
     parser.add_argument(
         "--block-row",
         type=int,
-        default=DEFAULT_TRANSFORM_BLOCK_ROW,
+        default=None,
         help="Transform-cut selected block row, zero-based from the top.",
+    )
+    parser.add_argument(
+        "--block",
+        action="append",
+        metavar="COL,ROW",
+        help="Selected transform-cut block. Repeat to export multiple blocks in page order.",
     )
     return parser
 
@@ -680,8 +728,23 @@ def main(argv: Sequence[str] | None = None) -> int:
             offset_y_px=parse_transform_float(args.transform_offset_y, "Transform offset Y"),
             rotation_deg=parse_transform_float(args.transform_rotation_deg, "Transform rotation"),
             scale=parse_transform_scale(args.transform_scale),
-            block_col=parse_block_index(args.block_col, "Selected block column"),
-            block_row=parse_block_index(args.block_row, "Selected block row"),
+            block_col=parse_block_index(
+                DEFAULT_TRANSFORM_BLOCK_COL if args.block_col is None else args.block_col,
+                "Selected block column",
+            ),
+            block_row=parse_block_index(
+                DEFAULT_TRANSFORM_BLOCK_ROW if args.block_row is None else args.block_row,
+                "Selected block row",
+            ),
+        )
+        if args.block and not args.transform_cut:
+            raise ValueError("--block requires --transform-cut.")
+        if args.block and (args.block_col is not None or args.block_row is not None):
+            raise ValueError("Use either repeated --block or --block-col/--block-row, not both.")
+        requested_blocks = (
+            [parse_block_coordinate(value) for value in args.block]
+            if args.block
+            else [(transform_options.block_col, transform_options.block_row)]
         )
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
@@ -692,11 +755,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
 
     output_token = (
-        selected_block_output_token(
-            grid_selection.output_token,
-            transform_options.block_col,
-            transform_options.block_row,
-        )
+        selected_blocks_output_token(grid_selection.output_token, requested_blocks)
         if args.transform_cut
         else grid_selection.output_token
     )
@@ -747,33 +806,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         ]
 
         if args.transform_cut:
-            validate_selected_block(
-                transform_options.block_col,
-                transform_options.block_row,
-                cols,
-                rows,
-            )
-            selected_rect = compute_tile_crop(
-                transform_options.block_col,
-                transform_options.block_row,
-                cols,
-                rows,
-                width_px,
-                height_px,
-            )
-            transformed = render_transformed_tile(working_image, transform_options, selected_rect)
-            try:
-                warnings.extend(
-                    export_tiles_to_multipage_pdf(
-                        image=transformed,
-                        ordered_rects=[Rect(0, 0, transformed.width, transformed.height)],
-                        output_path=output_path,
-                        preserve_profile=True,
-                        preserve_metadata=True,
-                    )
+            selected_indices = ordered_selected_blocks(requested_blocks, cols, rows)
+            selected_rects = [
+                compute_tile_crop(col, row, cols, rows, width_px, height_px)
+                for col, row in selected_indices
+            ]
+            warnings.extend(
+                export_tiles_to_multipage_pdf(
+                    image=working_image,
+                    ordered_rects=selected_rects,
+                    output_path=output_path,
+                    preserve_profile=True,
+                    preserve_metadata=True,
+                    transform_options=transform_options,
                 )
-            finally:
-                transformed.close()
+            )
         else:
             warnings.extend(
                 export_tiles_to_multipage_pdf(
@@ -830,9 +877,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 f"(offset={transform_options.offset_x_px:.2f},{transform_options.offset_y_px:.2f}px, "
                 f"rotation={transform_options.rotation_deg:.2f}deg, "
                 f"scale={transform_options.scale:.4g}, "
-                f"block={transform_options.block_col},{transform_options.block_row})"
+                f"blocks={','.join(f'{col}:{row}' for col, row in selected_indices)})"
             )
-            print("Output pages: 1")
+            print(f"Output pages: {len(selected_indices)}")
         else:
             print(f"Grid: {cols}x{rows} ({cols * rows} pages)")
             print("Transform cut: disabled")

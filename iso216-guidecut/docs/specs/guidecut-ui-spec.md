@@ -1,7 +1,7 @@
 # Guidecut UI Specification
 
-Status: Draft v1.0
-Date: 2026-10-01
+Status: Draft v1.1
+Date: 2026-10-10
 
 ## 1. Purpose
 Design a simple desktop UI for running `iso216_guidecut.py` without requiring terminal use.
@@ -55,9 +55,10 @@ Current pass covers core run controls, preview integration, and expand-to-format
   - `Y`: source image vertical pan in pixels.
   - `Rot`: source image rotation in degrees around its center.
   - `Scale`: uniform source image zoom factor.
-  - `Col`: selected block column, zero-based.
-  - `Row`: selected block row, zero-based.
-- `Reset` button restores transform defaults.
+  - `Col`: active block column, zero-based.
+  - `Row`: active block row, zero-based.
+- `Reset` button restores transform defaults and selects the first block only.
+- `Select All` button selects every block in the current grid.
 
 ## 3. Non-Goals (Initial Pass)
 - Batch mode (multiple files).
@@ -93,7 +94,7 @@ Current layout in the implemented UI:
   - right: `Cols` / `Rows` fields (hidden unless custom mode is enabled).
 7. Row 7: `Transform Cut` row:
   - left: `Transform Cut` toggle,
-  - right: transform controls (`X`, `Y`, `Rot`, `Scale`, `Col`, `Row`, `Reset`) hidden unless transform mode is enabled.
+  - right: transform controls (`X`, `Y`, `Rot`, `Scale`, `Col`, `Row`, `Reset`, `Select All`) hidden unless transform mode is enabled.
 8. Row 8: action row, spanning all 3 columns.
 - Inside row 8:
   - compact `Target Format` cluster at the left edge:
@@ -243,9 +244,18 @@ Current layout in the implemented UI:
   - transform controls are shown,
   - preview keeps guide/grid layer fixed,
   - preview transforms the source image underneath the fixed guides,
-  - selected block is highlighted,
-  - clicking inside a preview block updates `Col` and `Row`,
-  - run exports only the selected block as a single-page PDF.
+  - all selected blocks are highlighted,
+  - a plain click selects only that block and updates `Col` and `Row`,
+  - Ctrl+click adds or removes that block without clearing other selections,
+  - editing `Col` or `Row` selects the entered block alone,
+  - `Select All` selects every block in the current grid,
+  - left click and drag pans the source image in the same direction as the pointer, with offsets measured in original working-image pixels,
+  - right click and drag rotates the source; right/down is clockwise and left/up is counterclockwise,
+  - scrolling up zooms in and scrolling down zooms out, updating `Scale`,
+  - mouse manipulation updates the corresponding `X`, `Y`, `Rot`, and `Scale` controls live,
+  - when expand-to-format is also active, left drag pans the source instead of changing trim bias; the trim-bias slider remains available,
+  - run exports selected blocks as pages in one PDF, ordered top-to-bottom then left-to-right, regardless of selection order,
+  - an empty selection is allowed while editing but blocks Run with a clear error.
 - Defaults:
   - `X = 0`
   - `Y = 0`
@@ -254,7 +264,7 @@ Current layout in the implemented UI:
   - `Col = 0`
   - `Row = 0`
 - Transform values are session controls and are not persisted across app restart.
-- Selected block coordinates are zero-based from top-left guide space and must be valid for the current resolved grid.
+- Selected block coordinates are zero-based from top-left guide space and must be valid for the current resolved grid. Selections outside a changed grid are removed; if a nonempty selection would become empty, the first block is selected.
 
 ## 6. Script Integration Contract
 Base command form:
@@ -284,7 +294,7 @@ python iso216_guidecut.py "<input_path>" --grid-cols "<1..32>" --grid-rows "<1..
 With transform-cut mode enabled:
 
 ```powershell
-python iso216_guidecut.py "<input_path>" "<target_format>" --transform-cut --transform-offset-x "<px>" --transform-offset-y "<px>" --transform-rotation-deg "<deg>" --transform-scale "<factor>" --block-col "<zero-based-col>" --block-row "<zero-based-row>"
+python iso216_guidecut.py "<input_path>" "<target_format>" --transform-cut --transform-offset-x "<px>" --transform-offset-y "<px>" --transform-rotation-deg "<deg>" --transform-scale "<factor>" --block "<col,row>" [--block "<col,row>" ...]
 ```
 
 Execution details:
@@ -295,7 +305,7 @@ Execution details:
   - `<output_dir>\<input-stem>-guidecut-<target-format>-<YYYYMMDD-HHMMSS>.pdf`
 - If explicit output-directory field is empty, do not pass `--output`; use script default location (source file directory).
 - Pass expand args only when expand toggle is enabled.
-- Pass transform args only when transform toggle is enabled.
+- Pass transform args and one `--block` per selected block only when transform toggle is enabled.
 - Pass either preset target argument or custom grid args, never both.
 - Exit code handling:
   - `0`: success message with generated output path.
@@ -338,8 +348,8 @@ Execution details:
 14. Enabling `Expand to Format` reveals bias slider and running passes expand args to CLI.
 15. Bias slider and preview interactions stay synchronized for the active document (document change and post-run reset behavior are enforced).
 16. Enabling `Transform Cut` reveals transform controls and running passes transform args to CLI.
-17. With `Transform Cut` enabled, preview highlights selected block and clicking a block updates `Col`/`Row`.
-18. With `Transform Cut` enabled, run exports one selected-block page instead of the full multi-page grid.
+17. With `Transform Cut` enabled, preview highlights all selected blocks; plain click replaces the selection, Ctrl+click toggles one block, and `Select All` selects the grid.
+18. With `Transform Cut` enabled, run exports selected blocks in row-major page order, and rejects an empty selection.
 
 ## 10. Suggested Implementation Notes
 - Recommended stack for first implementation: Python `tkinter` (no extra dependency).

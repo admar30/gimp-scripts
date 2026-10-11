@@ -28,7 +28,9 @@ from iso216_guidecut import (
     detect_orientation,
     is_near_iso216_ratio,
     main,
+    ordered_selected_blocks,
     parse_block_index,
+    parse_block_coordinate,
     parse_expand_bias_percent,
     parse_transform_scale,
     ordered_tiles,
@@ -38,6 +40,7 @@ from iso216_guidecut import (
     Rect,
     resolve_grid_selection,
     selected_block_output_token,
+    selected_blocks_output_token,
     TransformCutOptions,
     validate_selected_block,
 )
@@ -146,6 +149,22 @@ def test_ordered_tiles_row_major() -> None:
 
 def test_selected_block_output_token() -> None:
     assert selected_block_output_token("a2", 1, 0) == "a2-block-1-0"
+
+
+def test_multiple_block_selection_order_and_naming() -> None:
+    assert parse_block_coordinate("2,1") == (2, 1)
+    assert ordered_selected_blocks([(2, 1), (1, 0), (0, 0), (2, 1)], 3, 2) == [
+        (0, 0), (1, 0), (2, 1)
+    ]
+    assert selected_blocks_output_token("a2", [(1, 0)]) == "a2-block-1-0"
+    assert selected_blocks_output_token("a2", [(0, 0), (1, 1)]) == "a2-blocks-2"
+    assert selected_blocks_output_token("a2", [(1, 0), (1, 0)]) == "a2-block-1-0"
+    with pytest.raises(ValueError):
+        parse_block_coordinate("1:0")
+    with pytest.raises(ValueError):
+        ordered_selected_blocks([], 2, 2)
+    with pytest.raises(ValueError):
+        ordered_selected_blocks([(2, 0)], 2, 2)
     assert selected_block_output_token("grid-3x4", 2, 3) == "grid-3x4-block-2-3"
 
 
@@ -426,11 +445,13 @@ def test_main_transform_cut_exports_selected_single_block(monkeypatch: pytest.Mo
         output_path: Path,  # noqa: ARG001
         preserve_profile: bool = True,  # noqa: FBT001, FBT002
         preserve_metadata: bool = True,  # noqa: FBT001, FBT002
+        transform_options: TransformCutOptions | None = None,
     ) -> list[str]:
         captured["size"] = image.size
         captured["rects"] = list(ordered_rects)
         captured["preserve_profile"] = preserve_profile
         captured["preserve_metadata"] = preserve_metadata
+        captured["transform_options"] = transform_options
         return []
 
     monkeypatch.setattr(guidecut_module, "export_tiles_to_multipage_pdf", fake_export)
@@ -458,12 +479,45 @@ def test_main_transform_cut_exports_selected_single_block(monkeypatch: pytest.Mo
         ]
     )
     assert exit_code == 0
-    assert captured["size"] == (600, 250)
+    assert captured["size"] == (1200, 500)
     rects = captured["rects"]
     assert len(rects) == 1
-    assert rects[0].box == (0, 0, 600, 250)
+    assert rects[0].box == (600, 0, 1200, 250)
+    assert isinstance(captured["transform_options"], TransformCutOptions)
     assert captured["preserve_profile"] is True
     assert captured["preserve_metadata"] is True
+
+
+def test_main_transform_cut_multiple_blocks_follow_page_order(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    input_path = tmp_path / "source.png"
+    Image.new("RGB", (1200, 500), "white").save(input_path)
+    captured: dict[str, object] = {}
+
+    def fake_export(image, ordered_rects, output_path, **kwargs):  # noqa: ANN001
+        captured["rects"] = [rect.box for rect in ordered_rects]
+        captured["transform"] = kwargs["transform_options"]
+        return []
+
+    monkeypatch.setattr(guidecut_module, "export_tiles_to_multipage_pdf", fake_export)
+    exit_code = main(
+        [
+            str(input_path), "a2", "--transform-cut",
+            "--block", "1,1", "--block", "1,0", "--block", "0,0", "--block", "1,0", "--quiet",
+        ]
+    )
+    assert exit_code == 0
+    assert captured["rects"] == [
+        (0, 0, 600, 250), (600, 0, 1200, 250), (600, 250, 1200, 500)
+    ]
+    assert isinstance(captured["transform"], TransformCutOptions)
+
+
+def test_main_rejects_mixed_legacy_and_multiple_block_flags(tmp_path: Path) -> None:
+    input_path = tmp_path / "source.png"
+    Image.new("RGB", (100, 100), "white").save(input_path)
+    assert main([str(input_path), "a2", "--transform-cut", "--block", "0,0", "--block-col", "0", "--quiet"]) == 2
 
 
 def test_main_transform_cut_rejects_out_of_range_block(tmp_path: Path) -> None:

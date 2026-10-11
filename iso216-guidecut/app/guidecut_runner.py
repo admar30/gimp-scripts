@@ -6,6 +6,7 @@ Runner helpers for the ISO216 Guidecut UI.
 from __future__ import annotations
 
 import json
+import math
 import re
 import subprocess
 import sys
@@ -31,6 +32,7 @@ from iso216_guidecut import (
     compute_guides,
     compute_tile_crop,
     detect_orientation,
+    ordered_selected_blocks,
     parse_block_index,
     parse_transform_float,
     parse_transform_scale,
@@ -39,6 +41,7 @@ from iso216_guidecut import (
     render_transformed_source,
     resolve_grid_selection,
     selected_block_output_token,
+    selected_blocks_output_token,
     TransformCutOptions,
     validate_selected_block,
 )
@@ -280,6 +283,7 @@ def build_output_pdf_path(
     transform_cut: bool = False,
     transform_block_col: int = 0,
     transform_block_row: int = 0,
+    transform_blocks: Sequence[tuple[int, int]] | None = None,
     now_local: datetime | None = None,
 ) -> Path:
     grid_selection = resolve_grid_selection(
@@ -289,7 +293,10 @@ def build_output_pdf_path(
     )
     output_token = grid_selection.output_token
     if transform_cut:
-        output_token = selected_block_output_token(output_token, transform_block_col, transform_block_row)
+        if transform_blocks is None:
+            output_token = selected_block_output_token(output_token, transform_block_col, transform_block_row)
+        else:
+            output_token = selected_blocks_output_token(output_token, transform_blocks)
     now_local = now_local or datetime.now().astimezone()
     timestamp = now_local.strftime("%Y%m%d-%H%M%S")
     stem = input_path.stem
@@ -323,6 +330,7 @@ def build_command(
     transform_scale: float | int | str = 1.0,
     transform_block_col: int | str = 0,
     transform_block_row: int | str = 0,
+    transform_blocks: Sequence[tuple[int, int]] | None = None,
 ) -> list[str]:
     grid_selection = resolve_grid_selection(
         target_format_value=target_format,
@@ -359,19 +367,26 @@ def build_command(
             [
                 "--transform-cut",
                 "--transform-offset-x",
-                f"{transform_options.offset_x_px:.4g}",
+                f"{transform_options.offset_x_px:.10g}",
                 "--transform-offset-y",
-                f"{transform_options.offset_y_px:.4g}",
+                f"{transform_options.offset_y_px:.10g}",
                 "--transform-rotation-deg",
-                f"{transform_options.rotation_deg:.4g}",
+                f"{transform_options.rotation_deg:.10g}",
                 "--transform-scale",
-                f"{transform_options.scale:.4g}",
-                "--block-col",
-                str(transform_options.block_col),
-                "--block-row",
-                str(transform_options.block_row),
+                f"{transform_options.scale:.10g}",
             ]
         )
+        if transform_blocks is None:
+            command.extend(
+                ["--block-col", str(transform_options.block_col), "--block-row", str(transform_options.block_row)]
+            )
+        else:
+            if not transform_blocks:
+                raise ValueError("Select at least one block for transform cut.")
+            for col, row in sorted(set(transform_blocks), key=lambda block: (block[1], block[0])):
+                command.extend(
+                    ["--block", f"{parse_block_index(col, 'Block column')},{parse_block_index(row, 'Block row')}"]
+                )
     return command
 
 
@@ -441,6 +456,41 @@ def scale_transform_for_preview(
         offset_x_px=options.offset_x_px * preview_w / source_w,
         offset_y_px=options.offset_y_px * preview_h / source_h,
     )
+
+
+def pan_offsets_from_preview_drag(
+    start_offsets: tuple[float, float],
+    pointer_delta: tuple[float, float],
+    display_size: tuple[int, int],
+    working_size: tuple[int, int],
+) -> tuple[float, float]:
+    display_w, display_h = display_size
+    working_w, working_h = working_size
+    if min(display_w, display_h, working_w, working_h) <= 0:
+        raise ValueError("Preview and working dimensions must be positive.")
+    return (
+        start_offsets[0] + pointer_delta[0] * working_w / display_w,
+        start_offsets[1] + pointer_delta[1] * working_h / display_h,
+    )
+
+
+def rotation_from_preview_drag(
+    start_rotation_deg: float,
+    pointer_delta: tuple[float, float],
+    degrees_per_pixel: float = 0.3,
+) -> float:
+    # Pillow's positive angle is counterclockwise; right/down drag is clockwise.
+    return start_rotation_deg - (pointer_delta[0] + pointer_delta[1]) * degrees_per_pixel
+
+
+def scale_from_preview_scroll(current_scale: float, steps: float) -> float:
+    if not math.isfinite(current_scale) or current_scale <= 0:
+        raise ValueError("Transform scale must be finite and greater than 0.")
+    if not math.isfinite(steps):
+        return current_scale
+    bounded_steps = max(-20.0, min(20.0, steps))
+    scaled = current_scale * (1.1 ** bounded_steps)
+    return scaled if math.isfinite(scaled) and scaled > 0 else current_scale
 
 
 def preview_block_for_point(

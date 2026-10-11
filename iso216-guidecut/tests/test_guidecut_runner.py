@@ -33,6 +33,7 @@ from guidecut_runner import (
     normalize_target_format,
     open_folder,
     open_folder_command,
+    pan_offsets_from_preview_drag,
     parse_transform_cut_options,
     preview_block_for_point,
     effective_preview_state,
@@ -43,9 +44,11 @@ from guidecut_runner import (
     resolve_open_folder,
     resolve_output_directory,
     retained_input_value_after_run,
+    rotation_from_preview_drag,
     run_command_streaming,
     sample_line_luminance,
     save_ui_state,
+    scale_from_preview_scroll,
     scaled_preview_crop_box,
     scale_transform_for_preview,
     sanitize_preview_split_ratio,
@@ -72,6 +75,17 @@ def test_preview_geometry_tracks_original_pixels_after_downsampling() -> None:
     assert preview.offset_y_px == -36
     assert preview.rotation_deg == options.rotation_deg
     assert preview.scale == options.scale
+
+
+def test_preview_transform_pointer_directions() -> None:
+    assert pan_offsets_from_preview_drag((10, -5), (20, -10), (400, 200), (4000, 1000)) == (210, -55)
+    assert rotation_from_preview_drag(0, (20, 0)) == -6
+    assert rotation_from_preview_drag(0, (0, 20)) == -6
+    assert rotation_from_preview_drag(0, (-20, -20)) == 12
+    assert scale_from_preview_scroll(1, 1) == pytest.approx(1.1)
+    assert scale_from_preview_scroll(1, -1) == pytest.approx(1 / 1.1)
+    assert scale_from_preview_scroll(100, 1) == pytest.approx(110)
+    assert scale_from_preview_scroll(0.01, -1) == pytest.approx(0.01 / 1.1)
 
 
 def test_normalize_target_format() -> None:
@@ -488,6 +502,19 @@ def test_build_output_pdf_path_transform_block_token(monkeypatch: pytest.MonkeyP
     assert output.name == "poster-guidecut-a2-block-1-0-20260321-172000.pdf"
 
 
+def test_build_output_pdf_path_multiple_transform_blocks(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(Path, "exists", lambda _self: False, raising=False)
+    output = build_output_pdf_path(
+        Path("C:/input/poster.png"),
+        target_format="a2",
+        output_dir=Path("C:/out"),
+        transform_cut=True,
+        transform_blocks=((0, 0), (1, 1)),
+        now_local=dt.datetime(2026, 3, 21, 17, 20, 0, tzinfo=dt.timezone.utc),
+    )
+    assert output.name == "poster-guidecut-a2-blocks-2-20260321-172000.pdf"
+
+
 def test_build_command_without_output() -> None:
     command = build_command(
         python_executable="python",
@@ -587,6 +614,44 @@ def test_build_command_with_transform_cut_args() -> None:
     assert command[command.index("--transform-scale") + 1] == "1.25"
     assert command[command.index("--block-col") + 1] == "1"
     assert command[command.index("--block-row") + 1] == "0"
+
+
+def test_build_command_with_multiple_transform_blocks() -> None:
+    command = build_command(
+        python_executable="python",
+        script_path=Path("iso216_guidecut.py"),
+        input_path=Path("C:/in/file.png"),
+        target_format="A2",
+        transform_cut=True,
+        transform_blocks=((1, 1), (0, 0), (1, 0), (1, 0)),
+    )
+    assert [command[index + 1] for index, item in enumerate(command[:-1]) if item == "--block"] == [
+        "0,0", "1,0", "1,1"
+    ]
+    assert "--block-col" not in command
+    assert "--block-row" not in command
+    with pytest.raises(ValueError, match="at least one block"):
+        build_command(
+            "python", Path("iso216_guidecut.py"), Path("C:/in/file.png"),
+            target_format="A2", transform_cut=True, transform_blocks=(),
+        )
+
+
+def test_build_command_keeps_mouse_transform_precision() -> None:
+    command = build_command(
+        python_executable="python",
+        script_path=Path("iso216_guidecut.py"),
+        input_path=Path("C:/in/file.png"),
+        target_format="A2",
+        output_path=None,
+        transform_cut=True,
+        transform_offset_x=1234.567,
+        transform_rotation_deg=-12.345,
+        transform_scale=1.234567,
+    )
+    assert command[command.index("--transform-offset-x") + 1] == "1234.567"
+    assert command[command.index("--transform-rotation-deg") + 1] == "-12.345"
+    assert command[command.index("--transform-scale") + 1] == "1.234567"
 
 
 def test_build_command_without_expand_args_when_disabled() -> None:
