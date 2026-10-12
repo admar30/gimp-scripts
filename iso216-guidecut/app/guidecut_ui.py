@@ -29,6 +29,7 @@ from guidecut_runner import (
     expand_crop_for_source,
     load_ui_state,
     normalize_target_format,
+    offsets_for_preview_center_pivot,
     open_folder,
     ordered_selected_blocks,
     pan_offsets_from_preview_drag,
@@ -519,6 +520,7 @@ class GuidecutApp(tk.Tk):
         self._transform_drag_working_size = (0, 0)
         self._transform_drag_moved = False
         self._updating_transform_vars = False
+        self._last_valid_transform_options = TransformCutUiOptions(enabled=True)
 
         self._style = apply_ttk_theme(self)
         self._load_persisted_state()
@@ -1243,6 +1245,7 @@ class GuidecutApp(tk.Tk):
         finally:
             self._updating_transform_vars = False
             self._updating_transform_selection_fields = False
+        self._last_valid_transform_options = TransformCutUiOptions(enabled=True)
         if self._preview_panel_visible and self._preview_source_image is not None:
             self._invalidate_guide_style_cache()
             self._render_preview(compute_contrast=False)
@@ -1305,6 +1308,35 @@ class GuidecutApp(tk.Tk):
     def _on_transform_value_changed(self, *_args) -> None:
         if not self.transform_cut_var.get() or self._updating_transform_vars:
             return
+        try:
+            current = self._current_transform_options(strict=True)
+        except ValueError:
+            current = None
+        if current is not None:
+            previous = self._last_valid_transform_options
+            if (current.rotation_deg, current.scale) != (previous.rotation_deg, previous.scale):
+                try:
+                    offset_x, offset_y = offsets_for_preview_center_pivot(
+                        (previous.offset_x_px, previous.offset_y_px),
+                        previous.rotation_deg,
+                        previous.scale,
+                        current.rotation_deg,
+                        current.scale,
+                    )
+                except ValueError:
+                    current = None
+                else:
+                    self._updating_transform_vars = True
+                    try:
+                        x_text = f"{offset_x:.6f}".rstrip("0").rstrip(".")
+                        y_text = f"{offset_y:.6f}".rstrip("0").rstrip(".")
+                        self.transform_offset_x_var.set("0" if x_text in {"", "-0"} else x_text)
+                        self.transform_offset_y_var.set("0" if y_text in {"", "-0"} else y_text)
+                    finally:
+                        self._updating_transform_vars = False
+                    current = self._current_transform_options(strict=True)
+            if current is not None:
+                self._last_valid_transform_options = current
         if self._preview_panel_visible and self._preview_source_image is not None:
             self._invalidate_guide_style_cache()
             self._render_preview(compute_contrast=False)

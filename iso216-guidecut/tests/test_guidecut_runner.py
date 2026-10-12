@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import math
 import subprocess
 import sys
 from pathlib import Path
@@ -31,6 +32,7 @@ from guidecut_runner import (
     GUIDE_CONTRAST_HALO_THRESHOLD,
     load_ui_state,
     normalize_target_format,
+    offsets_for_preview_center_pivot,
     open_folder,
     open_folder_command,
     pan_offsets_from_preview_drag,
@@ -86,6 +88,25 @@ def test_preview_transform_pointer_directions() -> None:
     assert scale_from_preview_scroll(1, -1) == pytest.approx(1 / 1.1)
     assert scale_from_preview_scroll(100, 1) == pytest.approx(110)
     assert scale_from_preview_scroll(0.01, -1) == pytest.approx(0.01 / 1.1)
+
+
+def test_preview_center_pivot_keeps_source_point_stationary() -> None:
+    offsets = (40.0, 20.0)
+    rotated = offsets_for_preview_center_pivot(offsets, 0, 1, 90, 1)
+    assert rotated == pytest.approx((20.0, -40.0))
+    zoomed = offsets_for_preview_center_pivot(rotated, 90, 1, 90, 2)
+    assert zoomed == pytest.approx((40.0, -80.0))
+
+    def source_point_at_center(offset: tuple[float, float], angle: float, scale: float) -> tuple[float, float]:
+        radians = math.radians(angle)
+        cosine, sine = math.cos(radians), math.sin(radians)
+        x, y = offset
+        return (-(cosine * x - sine * y) / scale, -(sine * x + cosine * y) / scale)
+
+    assert source_point_at_center(rotated, 90, 1) == pytest.approx(source_point_at_center(offsets, 0, 1))
+    assert source_point_at_center(zoomed, 90, 2) == pytest.approx(source_point_at_center(offsets, 0, 1))
+    with pytest.raises(ValueError):
+        offsets_for_preview_center_pivot(offsets, 0, 0, 90, 1)
 
 
 def test_normalize_target_format() -> None:

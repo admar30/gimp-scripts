@@ -483,6 +483,28 @@ def rotation_from_preview_drag(
     return start_rotation_deg - (pointer_delta[0] + pointer_delta[1]) * degrees_per_pixel
 
 
+def offsets_for_preview_center_pivot(
+    offsets: tuple[float, float],
+    old_rotation_deg: float,
+    old_scale: float,
+    new_rotation_deg: float,
+    new_scale: float,
+) -> tuple[float, float]:
+    """Keep the source point beneath the fixed preview center in place."""
+    values = (*offsets, old_rotation_deg, old_scale, new_rotation_deg, new_scale)
+    if not all(math.isfinite(value) for value in values) or old_scale <= 0 or new_scale <= 0:
+        raise ValueError("Transform values must be finite and scales must be positive.")
+    # Re-express the existing translation after changing the rotation and scale.
+    angle = math.radians(math.remainder(new_rotation_deg, 360) - math.remainder(old_rotation_deg, 360))
+    cosine, sine = math.cos(angle), math.sin(angle)
+    ratio = new_scale / old_scale
+    x, y = offsets
+    result = (ratio * (cosine * x + sine * y), ratio * (-sine * x + cosine * y))
+    if not all(math.isfinite(value) for value in result):
+        raise ValueError("Transform offsets exceed the supported range.")
+    return result
+
+
 def scale_from_preview_scroll(current_scale: float, steps: float) -> float:
     if not math.isfinite(current_scale) or current_scale <= 0:
         raise ValueError("Transform scale must be finite and greater than 0.")

@@ -53,8 +53,8 @@ Current pass covers core run controls, preview integration, and expand-to-format
 - Hidden transform controls shown when enabled:
   - `X`: source image horizontal pan in pixels.
   - `Y`: source image vertical pan in pixels.
-  - `Rot`: source image rotation in degrees around its center.
-  - `Scale`: uniform source image zoom factor.
+  - `Rot`: source image rotation in degrees around the preview centre.
+  - `Scale`: uniform source image zoom factor around the preview centre.
   - `Col`: active block column, zero-based.
   - `Row`: active block row, zero-based.
 - `Reset` button restores transform defaults and selects the first block only.
@@ -252,6 +252,8 @@ Current layout in the implemented UI:
   - left click and drag pans the source image in the same direction as the pointer, with offsets measured in original working-image pixels,
   - right click and drag rotates the source; right/down is clockwise and left/up is counterclockwise,
   - scrolling up zooms in and scrolling down zooms out, updating `Scale`,
+  - rotation and scaling keep the source point beneath the preview centre stationary, including when `Rot` or `Scale` is edited directly,
+  - `X` and `Y` are adjusted automatically on rotation/scale changes so preview and exported PDF use the same anchored transform,
   - mouse manipulation updates the corresponding `X`, `Y`, `Rot`, and `Scale` controls live,
   - when expand-to-format is also active, left drag pans the source instead of changing trim bias; the trim-bias slider remains available,
   - run exports selected blocks as pages in one PDF, ordered top-to-bottom then left-to-right, regardless of selection order,

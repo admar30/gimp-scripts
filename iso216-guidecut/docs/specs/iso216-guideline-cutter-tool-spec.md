@@ -61,6 +61,7 @@ Behavior:
 - Guides/grid remain a fixed cutting frame.
 - The source image is transformed underneath that fixed frame.
 - Transform origin is the source image center.
+- The desktop UI compensates `offset-x`/`offset-y` during rotation and scaling so the source point under the fixed preview centre remains stationary; direct CLI parameters retain the source-centred transform model.
 - `offset-x` and `offset-y` pan the transformed image in guide-space pixels.
 - `rotation-deg` rotates the source in the 2D plane.
 - `scale` is uniform image zoom.

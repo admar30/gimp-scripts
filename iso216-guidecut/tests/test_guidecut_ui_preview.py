@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from PIL import Image
 
 APP_DIR = Path(__file__).resolve().parents[1] / "app"
@@ -88,6 +89,57 @@ def test_transform_preview_click_drag_rotate_and_wheel() -> None:
         assert updates[-1]["scale"] < 1
     finally:
         app._preview_source_image.close()
+
+
+def test_rotation_and_zoom_controls_pivot_at_preview_center() -> None:
+    app = GuidecutApp.__new__(GuidecutApp)
+    app.transform_cut_var = SimpleNamespace(get=lambda: True)
+    app.transform_offset_x_var = FakeVar("0")
+    app.transform_offset_y_var = FakeVar("0")
+    app.transform_rotation_var = FakeVar("0")
+    app.transform_scale_var = FakeVar("1")
+    app.transform_block_col_var = FakeVar("0")
+    app.transform_block_row_var = FakeVar("0")
+    app._last_valid_transform_options = TransformCutUiOptions(enabled=True)
+    app._updating_transform_vars = False
+    app._preview_panel_visible = False
+    app._preview_source_image = None
+
+    app._set_transform_control_values(offset_x=40, offset_y=20)
+    app._set_transform_control_values(rotation=90)
+    assert float(app.transform_offset_x_var.get()) == pytest.approx(20)
+    assert float(app.transform_offset_y_var.get()) == pytest.approx(-40)
+
+    app._set_transform_control_values(scale=2)
+    assert float(app.transform_offset_x_var.get()) == pytest.approx(40)
+    assert float(app.transform_offset_y_var.get()) == pytest.approx(-80)
+
+    app._preview_point_in_image = lambda _event: True
+    assert app._change_preview_scale(SimpleNamespace(), 1) == "break"
+    assert float(app.transform_scale_var.get()) == pytest.approx(2.2)
+    assert float(app.transform_offset_x_var.get()) == pytest.approx(44)
+    assert float(app.transform_offset_y_var.get()) == pytest.approx(-88)
+
+    app.transform_rotation_var.set("180")
+    app._on_transform_value_changed()
+    assert float(app.transform_offset_x_var.get()) == pytest.approx(-88)
+    assert float(app.transform_offset_y_var.get()) == pytest.approx(-44)
+
+    app.transform_scale_var.set("")
+    app._on_transform_value_changed()
+    assert app._last_valid_transform_options.scale == pytest.approx(2.2)
+    app.transform_scale_var.set("1")
+    app._on_transform_value_changed()
+    assert float(app.transform_offset_x_var.get()) == pytest.approx(-40)
+    assert float(app.transform_offset_y_var.get()) == pytest.approx(-20)
+
+    app._updating_transform_selection_fields = False
+    app._selected_transform_blocks = {(0, 0)}
+    app._reset_transform_state()
+    assert app._last_valid_transform_options == TransformCutUiOptions(enabled=True)
+    app._set_transform_control_values(rotation=90)
+    assert app.transform_offset_x_var.get() == "0"
+    assert app.transform_offset_y_var.get() == "0"
 
 
 def test_ctrl_click_toggles_blocks_and_select_all() -> None:

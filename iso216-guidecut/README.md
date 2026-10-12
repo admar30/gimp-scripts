@@ -113,6 +113,7 @@ UI interactions in current pass:
 - `Transform Cut` toggle reveals source transform controls (`X`, `Y`, `Rot`, `Scale`), active block controls (`Col`, `Row`), `Reset`, and `Select All`.
 - With transform mode enabled, preview keeps guides fixed and transforms the source image underneath. Click a block to select only it; Ctrl+click a block to add or remove it without clearing other selections. `Select All` selects every block. Editing `Col`/`Row` selects that single block.
 - In transform mode, left drag pans the image in the pointer's direction, right drag rotates (right/down clockwise), and the mouse wheel zooms (up/in, down/out). A left click without dragging still selects a block. Pan takes priority over expand-bias dragging while transform mode is enabled.
+- Rotation and zoom, whether by mouse or by editing `Rot`/`Scale`, keep the image point at the preview centre fixed; `X`/`Y` update automatically to preserve that anchor.
 - With transform mode enabled, `Run` exports the selected blocks as pages in one PDF. Deselecting every block prevents a run until at least one is selected.
 - `Run` executes in a background thread and streams stdout/stderr to the status panel.
 - Post-run input behavior keeps only the source folder path (filename cleared) to speed up selecting the next file.
