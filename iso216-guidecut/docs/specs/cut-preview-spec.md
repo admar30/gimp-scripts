@@ -1,4 +1,4 @@
-﻿# Guidecut Cut Preview Feature Spec
+# Guidecut Cut Preview Feature Spec
 
 Status: Draft v0.3  
 Date: 2026-05-31
@@ -7,7 +7,7 @@ Date: 2026-05-31
 Add an in-app visual cut preview so users can verify tile boundaries before running Guidecut.
 
 ## 2. Scope
-This feature adds a right-side preview panel and a `Show preview` toggle tied to the selected input document and current target format. It also integrates expand-to-format preview behavior and drag-driven trim bias adjustment.
+This feature adds a right-side preview panel and a `Show preview` toggle tied to the selected input document and current target format. It also integrates conform-to-layout preview behavior and drag-driven trim bias adjustment.
 
 ## 3. Functional Requirements
 1. When a document is selected, a `Show preview` toggle appears on the same row as `Specify output directory`, aligned to the right side.
@@ -24,9 +24,9 @@ This feature adds a right-side preview panel and a `Show preview` toggle tied to
 10. Last used UI/preview split dimensions must persist after preview collapse so re-enabling preview restores the prior split state relative to current UI-panel size.
 11. On preview open, auto-fit preview panel width to the rendered preview image width (plus required panel chrome) so avoidable x-axis whitespace is removed.
 12. Repeated preview show/hide cycles and app restarts must not cause cumulative window-width growth.
-13. When `Expand to Format` is enabled, preview renders and guides must use the effective cropped working area.
-14. While expand mode is enabled and an excess trim axis exists, dragging the preview image along the excess axis must update expand bias in real time.
-15. Preview drag and expand bias slider must remain synchronized bidirectionally.
+13. When `Conform to Layout` is enabled, preview renders and guides must use the resolved Fill frame for the selected preset or custom grid.
+14. While conformity is enabled and an excess trim axis exists, dragging the preview image along the excess axis must update Fill bias in real time.
+15. Preview drag and Fill bias slider must remain synchronized bidirectionally.
 
 ## 4. UI Layout
 ### 4.1 Main Structure
@@ -75,16 +75,20 @@ This feature adds a right-side preview panel and a `Show preview` toggle tied to
 - Overlay updates immediately when target format changes.
 - Guide color should be selected from a high-contrast palette using sampled pixels under/near each guide path.
 - If measured contrast is still weak, render a secondary outline/halo stroke behind the guide for legibility.
-- Expand-mode interaction:
-  - When expand mode is enabled, compute crop rectangle first, then render preview from the cropped working area.
-  - Guide geometry is computed against cropped dimensions, not original source dimensions.
+- Conformity interaction:
+  - Resolve Fill frame from the original oriented source dimensions and selected layout.
+  - Custom grids choose the A4 tile orientation retaining more source area, with portrait as the tie-break; guides use the aggregate grid ratio.
+  - Guide geometry is computed against frame dimensions. Keep the full source bitmap available and sample it through the frame.
   - If source has no excess trim axis, drag behavior is disabled and slider is no-op/disabled.
+  - Incomplete custom dimensions retain the last valid preview and block Run.
+  - Transform Cut applies pan, rotation and scale to the full source, enabling recovery of initially trimmed pixels; default transforms match ordinary Fill output.
 
-### 5.3 Expand Drag and Slider Sync
+### 5.3 Fill Bias Drag and Slider Sync
 - Drag gesture is active only when:
   - preview is visible,
-  - expand mode is enabled,
+  - conformity is enabled,
   - a valid source is loaded,
+  - Transform Cut is disabled (its left-drag pan takes priority),
   - computed crop has an excess axis (`x` or `y`).
 - Drag direction:
   - excess on `x`: horizontal drag updates bias.
@@ -118,8 +122,8 @@ This feature adds a right-side preview panel and a `Show preview` toggle tied to
 - On startup, preview defaults to off/hidden.
 - `Show preview` becomes available only after a valid input file is selected.
 - Persist preview split ratio (UI pane vs preview pane) so split preference survives collapse/reopen and app restart.
-- Expand state is persisted as part of UI state schema, but per-document memory is session-only.
-- Because input filename is cleared to folder context after run/startup, expand controls naturally reset to defaults when no valid file is active.
+- Conformity state is persisted as part of UI state schema, but per-document memory is session-only.
+- Because input filename is cleared to folder context after run/startup, conformity controls naturally reset to defaults when no valid file is active.
 
 ## 7. Performance and Reliability
 - Preview updates must not block the UI event loop.
@@ -127,10 +131,10 @@ This feature adds a right-side preview panel and a `Show preview` toggle tied to
 - Failures in preview loading should not affect run/open-folder functionality.
 - Contrast analysis for guide color should remain lightweight enough for interactive resize (sampling-based, not full-image analysis).
 - Contrast recompute after panel resize should be debounce/settle-based (after resize drag ends), not on every intermediate mouse-move resize event.
-- Expand drag updates should use fast redraw during motion and defer heavier contrast recompute to debounce/settle timing.
+- Fill-bias drag updates should use fast redraw during motion and defer heavier contrast recompute to debounce/settle timing.
 
 ## 8. Non-Goals (Initial Pass)
-- Zoom/pan controls.
+- Fit/padding and manual tile-orientation overrides.
 - Multi-page preview.
 - Manual guide editing in preview.
 - Exporting preview image.
@@ -151,7 +155,7 @@ This feature adds a right-side preview panel and a `Show preview` toggle tied to
 13. After preview is hidden, showing preview again restores pane split sizing based on the last saved split ratio and current UI pane width.
 14. Enabling preview auto-collapses panel width to content width so avoidable horizontal whitespace is minimized.
 15. Across repeated app restarts and preview toggles, window width remains stable (no progressive growth drift).
-16. With expand mode enabled, preview guides align to cropped working area and match CLI crop semantics.
+16. With conformity enabled, preview guides align to the Fill frame and match CLI layout semantics, including auto custom tile orientation and full-source transforms.
 17. Dragging preview along excess axis updates trim bias live and remains synchronized with slider value.
 
 ## 10. Implementation Notes

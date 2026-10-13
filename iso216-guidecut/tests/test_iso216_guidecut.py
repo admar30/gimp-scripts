@@ -324,6 +324,7 @@ def test_main_expand_off_keeps_original_geometry(monkeypatch: pytest.MonkeyPatch
         output_path: Path,  # noqa: ARG001
         preserve_profile: bool = True,  # noqa: FBT001, FBT002
         preserve_metadata: bool = True,  # noqa: FBT001, FBT002
+        frame: Rect | None = None,
     ) -> list[str]:
         captured["size"] = image.size
         captured["rects"] = list(ordered_rects)
@@ -357,9 +358,11 @@ def test_main_expand_on_uses_cropped_geometry(monkeypatch: pytest.MonkeyPatch, t
         output_path: Path,  # noqa: ARG001
         preserve_profile: bool = True,  # noqa: FBT001, FBT002
         preserve_metadata: bool = True,  # noqa: FBT001, FBT002
+        frame: Rect | None = None,
     ) -> list[str]:
         captured["size"] = image.size
         captured["rects"] = list(ordered_rects)
+        captured["frame"] = frame
         captured["preserve_profile"] = preserve_profile
         captured["preserve_metadata"] = preserve_metadata
         return []
@@ -380,7 +383,9 @@ def test_main_expand_on_uses_cropped_geometry(monkeypatch: pytest.MonkeyPatch, t
     )
     assert exit_code == 0
     expected_width = int(round(500 * math.sqrt(2.0)))
-    assert captured["size"] == (expected_width, 500)
+    assert captured["size"] == (1200, 500)
+    frame = captured["frame"]
+    assert (frame.x1 - frame.x0, frame.y1 - frame.y0) == (expected_width, 500)
     rects = captured["rects"]
     assert rects[0].y0 == 0
     assert rects[0].y1 == 500
@@ -405,6 +410,7 @@ def test_main_custom_grid_mode_uses_explicit_dimensions(monkeypatch: pytest.Monk
         output_path: Path,  # noqa: ARG001
         preserve_profile: bool = True,  # noqa: FBT001, FBT002
         preserve_metadata: bool = True,  # noqa: FBT001, FBT002
+        frame: Rect | None = None,
     ) -> list[str]:
         captured["size"] = image.size
         captured["rects"] = list(ordered_rects)
@@ -446,6 +452,7 @@ def test_main_transform_cut_exports_selected_single_block(monkeypatch: pytest.Mo
         preserve_profile: bool = True,  # noqa: FBT001, FBT002
         preserve_metadata: bool = True,  # noqa: FBT001, FBT002
         transform_options: TransformCutOptions | None = None,
+        frame: Rect | None = None,
     ) -> list[str]:
         captured["size"] = image.size
         captured["rects"] = list(ordered_rects)

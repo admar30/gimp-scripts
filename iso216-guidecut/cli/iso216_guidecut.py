@@ -18,7 +18,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterable, Sequence
 
-from PIL import Image
+from PIL import Image, ImageOps
 
 
 TARGET_SPLITS = {
@@ -29,7 +29,8 @@ TARGET_SPLITS = {
 }
 
 ISO216_ASPECT_RATIO = math.sqrt(2.0)
-DEFAULT_EXPAND_BIAS_PERCENT = 50.0
+DEFAULT_CONFORM_BIAS_PERCENT = 50.0
+DEFAULT_EXPAND_BIAS_PERCENT = DEFAULT_CONFORM_BIAS_PERCENT
 CUSTOM_GRID_MIN = 1
 CUSTOM_GRID_MAX = 32
 DEFAULT_TRANSFORM_OFFSET_X_PX = 0.0
@@ -53,13 +54,16 @@ class Rect:
 
 
 @dataclass(frozen=True)
-class ExpandCrop:
+class FillCrop:
     rect: Rect
     axis: str | None
     excess_px: int
     leading_trim_px: int
     trailing_trim_px: int
     bias_percent: float
+
+
+ExpandCrop = FillCrop
 
 
 @dataclass(frozen=True)
@@ -69,6 +73,23 @@ class GridSelection:
     cols: int | None
     rows: int | None
     output_token: str
+
+
+@dataclass(frozen=True)
+class LayoutGeometry:
+    cols: int
+    rows: int
+    target_ratio: float
+    tile_orientation: str
+    crop: FillCrop
+
+    @property
+    def frame(self) -> Rect:
+        return self.crop.rect
+
+    @property
+    def size(self) -> tuple[int, int]:
+        return self.frame.x1 - self.frame.x0, self.frame.y1 - self.frame.y0
 
 
 @dataclass(frozen=True)
@@ -232,6 +253,8 @@ def clamp_expand_bias_percent(value: float | int, default: float = DEFAULT_EXPAN
         parsed = float(value)
     except (TypeError, ValueError):
         parsed = float(default)
+    if not math.isfinite(parsed):
+        parsed = float(default)
     return max(0.0, min(100.0, parsed))
 
 
@@ -239,9 +262,9 @@ def parse_expand_bias_percent(value: float | int | str) -> float:
     try:
         parsed = float(value)
     except (TypeError, ValueError) as exc:
-        raise ValueError(f"Expand bias percent must be a number in [0, 100], got '{value}'.") from exc
+        raise ValueError(f"Conform bias percent must be a number in [0, 100], got '{value}'.") from exc
     if not (0.0 <= parsed <= 100.0):
-        raise ValueError(f"Expand bias percent must be in [0, 100], got {parsed}.")
+        raise ValueError(f"Conform bias percent must be in [0, 100], got {parsed}.")
     return parsed
 
 
@@ -301,15 +324,39 @@ def _has_alpha(image: Image.Image) -> bool:
     return image.mode in {"RGBA", "LA"} or ("transparency" in image.info)
 
 
-def render_transformed_source(image: Image.Image, options: TransformCutOptions) -> Image.Image:
+def render_transformed_source(
+    image: Image.Image,
+    options: TransformCutOptions,
+    *,
+    frame: Rect | None = None,
+    source_size: tuple[int, int] | None = None,
+    output_size: tuple[int, int] | None = None,
+) -> Image.Image:
     """Render the transformed source underneath a fixed guide-space canvas."""
-    return render_transformed_tile(image, options, Rect(0, 0, image.width, image.height))
+    width, height = source_size or image.size
+    frame = frame or Rect(0, 0, width, height)
+    return render_transformed_tile(
+        image, options, Rect(0, 0, frame.x1 - frame.x0, frame.y1 - frame.y0),
+        frame=frame, source_size=source_size, output_size=output_size,
+    )
 
 
-def render_transformed_tile(image: Image.Image, options: TransformCutOptions, tile: Rect) -> Image.Image:
+def render_transformed_tile(
+    image: Image.Image,
+    options: TransformCutOptions,
+    tile: Rect,
+    *,
+    frame: Rect | None = None,
+    source_size: tuple[int, int] | None = None,
+    output_size: tuple[int, int] | None = None,
+) -> Image.Image:
     """Sample one guide block directly from the transformed source."""
-    width_px, height_px = image.size
-    if width_px <= 0 or height_px <= 0 or tile.x1 <= tile.x0 or tile.y1 <= tile.y0:
+    width_px, height_px = source_size or image.size
+    frame = frame or Rect(0, 0, width_px, height_px)
+    frame_w, frame_h = frame.x1 - frame.x0, frame.y1 - frame.y0
+    tile_w, tile_h = tile.x1 - tile.x0, tile.y1 - tile.y0
+    output_w, output_h = output_size or (tile_w, tile_h)
+    if min(width_px, height_px, image.width, image.height, frame_w, frame_h, tile_w, tile_h, output_w, output_h) <= 0:
         raise ValueError("Image and tile dimensions must be positive.")
     if not math.isfinite(options.scale) or options.scale <= 0:
         raise ValueError("Transform scale must be finite and greater than 0.")
@@ -317,16 +364,20 @@ def render_transformed_tile(image: Image.Image, options: TransformCutOptions, ti
     angle = math.radians(options.rotation_deg)
     cosine = math.cos(angle) / options.scale
     sine = math.sin(angle) / options.scale
-    center_x, center_y = width_px / 2.0, height_px / 2.0
+    center_x, center_y = frame_w / 2.0, frame_h / 2.0
+    anchor_x, anchor_y = frame.x0 + center_x, frame.y0 + center_y
     tile_origin_x = tile.x0 - center_x - options.offset_x_px
     tile_origin_y = tile.y0 - center_y - options.offset_y_px
+    source_scale_x, source_scale_y = image.width / width_px, image.height / height_px
+    output_scale_x, output_scale_y = tile_w / output_w, tile_h / output_h
+    # Compose guide-to-source sampling with thumbnail scaling for preview parity.
     transform = (
-        cosine,
-        -sine,
-        center_x + cosine * tile_origin_x - sine * tile_origin_y,
-        sine,
-        cosine,
-        center_y + sine * tile_origin_x + cosine * tile_origin_y,
+        source_scale_x * cosine * output_scale_x,
+        -source_scale_x * sine * output_scale_y,
+        source_scale_x * (anchor_x + cosine * tile_origin_x - sine * tile_origin_y),
+        source_scale_y * sine * output_scale_x,
+        source_scale_y * cosine * output_scale_y,
+        source_scale_y * (anchor_y + sine * tile_origin_x + cosine * tile_origin_y),
     )
 
     has_alpha = _has_alpha(image)
@@ -343,7 +394,7 @@ def render_transformed_tile(image: Image.Image, options: TransformCutOptions, ti
     resample = Image.Resampling.BICUBIC if hasattr(Image, "Resampling") else Image.BICUBIC
     try:
         rendered = source.transform(
-            (tile.x1 - tile.x0, tile.y1 - tile.y0),
+            (output_w, output_h),
             Image.Transform.AFFINE,
             transform,
             resample=resample,
@@ -367,93 +418,81 @@ def _target_ratio_for_orientation(orientation: str) -> float:
     return 1.0 / ISO216_ASPECT_RATIO
 
 
-def compute_expand_crop_rect(width_px: int, height_px: int, bias_percent: float | int) -> ExpandCrop:
+def compute_fill_crop_rect(
+    width_px: int, height_px: int, target_ratio: float, bias_percent: float | int,
+) -> FillCrop:
     if width_px <= 0 or height_px <= 0:
         raise ValueError("Image dimensions must be positive.")
-
-    orientation = detect_orientation(width_px, height_px)
-    target_ratio = _target_ratio_for_orientation(orientation)
+    if not math.isfinite(target_ratio) or target_ratio <= 0:
+        raise ValueError("Layout ratio must be finite and positive.")
     bias = clamp_expand_bias_percent(bias_percent)
     source_ratio = width_px / height_px
-
-    if is_near_iso216_ratio(width_px, height_px, tolerance=0.001):
-        rect = Rect(0, 0, width_px, height_px)
-        return ExpandCrop(
-            rect=rect,
-            axis=None,
-            excess_px=0,
-            leading_trim_px=0,
-            trailing_trim_px=0,
-            bias_percent=bias,
-        )
-
-    if math.isclose(source_ratio, target_ratio, rel_tol=0.0, abs_tol=1e-12):
-        rect = Rect(0, 0, width_px, height_px)
-        return ExpandCrop(
-            rect=rect,
-            axis=None,
-            excess_px=0,
-            leading_trim_px=0,
-            trailing_trim_px=0,
-            bias_percent=bias,
-        )
-
     if source_ratio > target_ratio:
-        # Too wide: trim horizontally.
-        new_width = max(1, min(width_px, int(round(height_px * target_ratio))))
+        new_width = max(1, min(width_px, round(height_px * target_ratio)))
         excess = max(0, width_px - new_width)
-        if excess <= 0:
-            rect = Rect(0, 0, width_px, height_px)
-            return ExpandCrop(
-                rect=rect,
-                axis=None,
-                excess_px=0,
-                leading_trim_px=0,
-                trailing_trim_px=0,
-                bias_percent=bias,
-            )
-        leading_trim = int(round(excess * (bias / 100.0)))
-        leading_trim = max(0, min(excess, leading_trim))
-        trailing_trim = excess - leading_trim
-        x0 = leading_trim
-        x1 = width_px - trailing_trim
-        rect = Rect(x0, 0, x1, height_px)
-        return ExpandCrop(
-            rect=rect,
-            axis="x",
-            excess_px=excess,
-            leading_trim_px=leading_trim,
-            trailing_trim_px=trailing_trim,
-            bias_percent=bias,
-        )
-
-    # Too tall: trim vertically.
-    new_height = max(1, min(height_px, int(round(width_px / target_ratio))))
-    excess = max(0, height_px - new_height)
+        axis = "x"
+    else:
+        new_height = max(1, min(height_px, round(width_px / target_ratio)))
+        excess = max(0, height_px - new_height)
+        axis = "y"
     if excess <= 0:
-        rect = Rect(0, 0, width_px, height_px)
-        return ExpandCrop(
-            rect=rect,
-            axis=None,
-            excess_px=0,
-            leading_trim_px=0,
-            trailing_trim_px=0,
-            bias_percent=bias,
-        )
-    leading_trim = int(round(excess * (bias / 100.0)))
-    leading_trim = max(0, min(excess, leading_trim))
-    trailing_trim = excess - leading_trim
-    y0 = leading_trim
-    y1 = height_px - trailing_trim
-    rect = Rect(0, y0, width_px, y1)
-    return ExpandCrop(
-        rect=rect,
-        axis="y",
-        excess_px=excess,
-        leading_trim_px=leading_trim,
-        trailing_trim_px=trailing_trim,
-        bias_percent=bias,
+        return FillCrop(Rect(0, 0, width_px, height_px), None, 0, 0, 0, bias)
+    leading = max(0, min(excess, round(excess * bias / 100)))
+    trailing = excess - leading
+    rect = (
+        Rect(leading, 0, width_px - trailing, height_px)
+        if axis == "x" else Rect(0, leading, width_px, height_px - trailing)
     )
+    return FillCrop(rect, axis, excess, leading, trailing, bias)
+
+
+def compute_expand_crop_rect(width_px: int, height_px: int, bias_percent: float | int) -> FillCrop:
+    """Legacy ISO-only helper, also preserving the preset near-ratio tolerance."""
+    if is_near_iso216_ratio(width_px, height_px, tolerance=0.001):
+        return FillCrop(Rect(0, 0, width_px, height_px), None, 0, 0, 0, clamp_expand_bias_percent(bias_percent))
+    ratio = _target_ratio_for_orientation(detect_orientation(width_px, height_px))
+    return compute_fill_crop_rect(width_px, height_px, ratio, bias_percent)
+
+
+def resolve_layout_geometry(
+    width_px: int,
+    height_px: int,
+    selection: GridSelection,
+    *,
+    conform_to_layout: bool = False,
+    bias_percent: float = DEFAULT_CONFORM_BIAS_PERCENT,
+) -> LayoutGeometry:
+    if width_px <= 0 or height_px <= 0:
+        raise ValueError("Image dimensions must be positive.")
+    source_ratio = width_px / height_px
+    if selection.mode == "preset":
+        assert selection.target is not None
+        orientation = detect_orientation(width_px, height_px)
+        cols, rows = compute_grid(selection.target, orientation)
+        target_ratio = _target_ratio_for_orientation(orientation)
+        crop = compute_expand_crop_rect(width_px, height_px, bias_percent) if conform_to_layout else None
+        tile_ratio = target_ratio * rows / cols
+        tile_orientation = "landscape" if tile_ratio > 1 else "portrait"
+    else:
+        assert selection.cols is not None and selection.rows is not None
+        cols, rows = selection.cols, selection.rows
+        portrait_ratio = cols / rows / ISO216_ASPECT_RATIO
+        landscape_ratio = cols / rows * ISO216_ASPECT_RATIO
+        portrait_score = min(source_ratio / portrait_ratio, portrait_ratio / source_ratio)
+        landscape_score = min(source_ratio / landscape_ratio, landscape_ratio / source_ratio)
+        use_landscape = landscape_score > portrait_score and not math.isclose(
+            landscape_score, portrait_score, rel_tol=0, abs_tol=1e-12,
+        )
+        target_ratio = landscape_ratio if use_landscape else portrait_ratio
+        tile_orientation = "landscape" if use_landscape else "portrait"
+        crop = compute_fill_crop_rect(width_px, height_px, target_ratio, bias_percent) if conform_to_layout else None
+    if crop is None:
+        crop = FillCrop(Rect(0, 0, width_px, height_px), None, 0, 0, 0, clamp_expand_bias_percent(bias_percent))
+        tile_orientation = detect_orientation(width_px * rows, height_px * cols)
+    geometry = LayoutGeometry(cols, rows, target_ratio, tile_orientation, crop)
+    if geometry.size[0] < cols or geometry.size[1] < rows:
+        raise ValueError("The cutting frame is too small for this grid; reduce columns or rows.")
+    return geometry
 
 
 def build_output_path(input_path: Path, target_token: str, now_local: datetime | None = None) -> Path:
@@ -514,6 +553,7 @@ def export_tiles_to_multipage_pdf(
     preserve_profile: bool = True,
     preserve_metadata: bool = True,
     transform_options: TransformCutOptions | None = None,
+    frame: Rect | None = None,
 ) -> list[str]:
     if not ordered_rects:
         raise ValueError("No tile rectangles provided for export.")
@@ -526,9 +566,12 @@ def export_tiles_to_multipage_pdf(
     try:
         for rect in ordered_rects:
             cropped = (
-                render_transformed_tile(image, transform_options, rect)
+                render_transformed_tile(image, transform_options, rect, frame=frame)
                 if transform_options is not None
-                else image.crop(rect.box)
+                else image.crop((
+                    rect.x0 + (frame.x0 if frame else 0), rect.y0 + (frame.y0 if frame else 0),
+                    rect.x1 + (frame.x0 if frame else 0), rect.y1 + (frame.y0 if frame else 0),
+                ))
             )
             try:
                 page = _normalize_for_pdf(cropped, page_mode)
@@ -584,18 +627,12 @@ def export_tiles_to_multipage_pdf(
 
 def _load_source_image(path: Path) -> Image.Image:
     try:
-        src = Image.open(path)
+        with Image.open(path) as src:
+            src.seek(0)
+            src.load()
+            return ImageOps.exif_transpose(src)
     except (OSError, FileNotFoundError) as exc:
         raise RuntimeError(f"Unable to open input file: {exc}") from exc
-
-    try:
-        src.seek(0)
-    except EOFError:
-        pass
-
-    # Materialize pixels up front so later crop operations are deterministic.
-    src.load()
-    return src
 
 
 def _format_int_list(values: Iterable[int]) -> str:
@@ -627,16 +664,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Only print errors.",
     )
     parser.add_argument(
-        "--expand-to-format",
+        "--conform-to-layout", "--expand-to-format",
+        dest="conform_to_layout",
         action="store_true",
-        help="Crop input to ISO216 aspect ratio before guide split.",
+        help="Fill the selected layout, choosing A4 tile orientation automatically for custom grids.",
     )
     parser.add_argument(
-        "--expand-bias-percent",
+        "--conform-bias-percent", "--expand-bias-percent",
+        dest="conform_bias_percent",
         type=float,
         default=DEFAULT_EXPAND_BIAS_PERCENT,
         help=(
-            "Bias for expand crop in [0,100]. 0 keeps left/top content, "
+            "Bias for layout Fill in [0,100]. 0 keeps left/top content, "
             "100 keeps right/bottom content."
         ),
     )
@@ -673,7 +712,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--transform-rotation-deg",
         type=float,
         default=DEFAULT_TRANSFORM_ROTATION_DEG,
-        help="Transform-cut source rotation in degrees around the source center.",
+        help="Transform-cut rotation around the Fill frame center (source center when conformity is off).",
     )
     parser.add_argument(
         "--transform-scale",
@@ -717,7 +756,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
 
     try:
-        expand_bias_percent = parse_expand_bias_percent(args.expand_bias_percent)
+        conform_bias_percent = parse_expand_bias_percent(args.conform_bias_percent)
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 2
@@ -769,32 +808,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
 
     try:
-        working_image = src
-        working_image_owned = False
         original_width_px, original_height_px = src.size
-        crop_info: ExpandCrop | None = None
         warnings: list[str] = []
-
-        if args.expand_to_format:
-            crop_info = compute_expand_crop_rect(original_width_px, original_height_px, expand_bias_percent)
-            if crop_info.excess_px > 0:
-                cropped = src.crop(crop_info.rect.box)
-                # Preserve metadata/profile hints for export.
-                cropped.info = dict(src.info)
-                working_image = cropped
-                working_image_owned = True
-
-        width_px, height_px = working_image.size
+        layout = resolve_layout_geometry(
+            original_width_px, original_height_px, grid_selection,
+            conform_to_layout=args.conform_to_layout, bias_percent=conform_bias_percent,
+        )
+        crop_info = layout.crop
+        width_px, height_px = layout.size
         orientation = detect_orientation(width_px, height_px)
-        if grid_selection.mode == "preset":
-            assert grid_selection.target is not None
-            cols, rows = compute_grid(grid_selection.target, orientation)
-        else:
-            assert grid_selection.cols is not None and grid_selection.rows is not None
-            cols, rows = grid_selection.cols, grid_selection.rows
+        cols, rows = layout.cols, layout.rows
         v_guides, h_guides = compute_guides(width_px, height_px, cols, rows)
 
-        if not args.expand_to_format and not is_near_iso216_ratio(width_px, height_px):
+        if not args.conform_to_layout and grid_selection.mode == "preset" and not is_near_iso216_ratio(width_px, height_px):
             warnings.append(
                 "Source dimensions are non-ISO ratio; continuing with guide split based on source canvas."
             )
@@ -813,22 +839,24 @@ def main(argv: Sequence[str] | None = None) -> int:
             ]
             warnings.extend(
                 export_tiles_to_multipage_pdf(
-                    image=working_image,
+                    image=src,
                     ordered_rects=selected_rects,
                     output_path=output_path,
                     preserve_profile=True,
                     preserve_metadata=True,
                     transform_options=transform_options,
+                    frame=layout.frame,
                 )
             )
         else:
             warnings.extend(
                 export_tiles_to_multipage_pdf(
-                    image=working_image,
+                    image=src,
                     ordered_rects=rects,
                     output_path=output_path,
                     preserve_profile=True,
                     preserve_metadata=True,
+                    frame=layout.frame,
                 )
             )
     except ValueError as exc:
@@ -838,8 +866,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(str(exc), file=sys.stderr)
         return 1
     finally:
-        if "working_image_owned" in locals() and working_image_owned:
-            working_image.close()
         src.close()
 
     if not args.quiet:
@@ -848,27 +874,27 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"Target format: {grid_selection.target}")
         else:
             print(f"Target format: custom grid ({grid_selection.cols}x{grid_selection.rows})")
-        if args.expand_to_format:
-            if crop_info is None:
-                print(f"Expand to format: enabled (bias={expand_bias_percent:.2f}%)")
-            elif crop_info.excess_px <= 0:
+        if args.conform_to_layout:
+            if crop_info.excess_px <= 0:
                 print(
-                    f"Expand to format: enabled (bias={crop_info.bias_percent:.2f}%), "
-                    "source already matches ISO ratio."
+                    f"Conform to layout: Fill (bias={crop_info.bias_percent:.2f}%), "
+                    "no trim needed."
                 )
             else:
                 axis_label = "horizontal (left/right trim)" if crop_info.axis == "x" else "vertical (top/bottom trim)"
                 print(
-                    f"Expand to format: enabled (bias={crop_info.bias_percent:.2f}%), "
+                    f"Conform to layout: Fill (bias={crop_info.bias_percent:.2f}%), "
                     f"{axis_label}, trimmed {crop_info.excess_px}px."
                 )
                 print(
-                    "Expanded crop: "
+                    "Fill frame: "
                     f"{crop_info.rect.x0},{crop_info.rect.y0} -> {crop_info.rect.x1},{crop_info.rect.y1} "
                     f"({original_width_px}x{original_height_px} -> {width_px}x{height_px})"
                 )
         else:
-            print("Expand to format: disabled")
+            print("Conform to layout: disabled")
+        if args.conform_to_layout and grid_selection.mode == "custom":
+            print(f"Tiles: {layout.tile_orientation.title()} (Auto)")
         print(f"Orientation: {orientation}")
         if args.transform_cut:
             print(f"Grid: {cols}x{rows} ({cols * rows} selectable blocks)")

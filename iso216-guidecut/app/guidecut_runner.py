@@ -17,6 +17,8 @@ from pathlib import Path
 from statistics import median
 from typing import Callable, Sequence
 
+from PIL import Image
+
 MODULE_ROOT = Path(__file__).resolve().parent.parent
 CLI_DIR = MODULE_ROOT / "cli"
 if str(CLI_DIR) not in sys.path:
@@ -32,6 +34,7 @@ from iso216_guidecut import (
     compute_guides,
     compute_tile_crop,
     detect_orientation,
+    LayoutGeometry,
     ordered_selected_blocks,
     parse_block_index,
     parse_transform_float,
@@ -40,6 +43,7 @@ from iso216_guidecut import (
     Rect,
     render_transformed_source,
     resolve_grid_selection,
+    resolve_layout_geometry,
     selected_block_output_token,
     selected_blocks_output_token,
     TransformCutOptions,
@@ -63,8 +67,8 @@ DEFAULT_UI_STATE = {
     "input_dir": "",
     "window_geometry": "",
     "preview_split_ratio": 0.5,
-    "expand_to_format": False,
-    "expand_bias_percent": 50.0,
+    "conform_to_layout": False,
+    "conform_bias_percent": 50.0,
 }
 
 GUIDE_PRIMARY_CANDIDATES = (
@@ -331,6 +335,8 @@ def build_command(
     transform_block_col: int | str = 0,
     transform_block_row: int | str = 0,
     transform_blocks: Sequence[tuple[int, int]] | None = None,
+    conform_to_layout: bool | None = None,
+    conform_bias_percent: float | int | None = None,
 ) -> list[str]:
     grid_selection = resolve_grid_selection(
         target_format_value=target_format,
@@ -350,9 +356,10 @@ def build_command(
         command.extend(["--grid-cols", str(grid_selection.cols), "--grid-rows", str(grid_selection.rows)])
     if output_path is not None:
         command.extend(["--output", str(output_path)])
-    if expand_to_format:
-        bias = clamp_expand_bias_percent(expand_bias_percent)
-        command.extend(["--expand-to-format", "--expand-bias-percent", f"{bias:.4g}"])
+    conform_enabled = expand_to_format if conform_to_layout is None else conform_to_layout
+    if conform_enabled:
+        bias = clamp_conform_bias_percent(expand_bias_percent if conform_bias_percent is None else conform_bias_percent)
+        command.extend(["--conform-to-layout", "--conform-bias-percent", f"{bias:.10g}"])
     if transform_cut:
         transform_options = parse_transform_cut_options(
             enabled=True,
@@ -655,6 +662,52 @@ def expand_crop_for_source(width_px: int, height_px: int, bias_percent: float | 
     return compute_expand_crop_rect(width_px, height_px, clamp_expand_bias_percent(bias_percent))
 
 
+def layout_for_source(
+    width_px: int,
+    height_px: int,
+    *,
+    target_format: str | None = None,
+    custom_grid_cols: int | None = None,
+    custom_grid_rows: int | None = None,
+    conform_to_layout: bool = False,
+    bias_percent: float = 50.0,
+) -> LayoutGeometry:
+    selection = resolve_grid_selection(target_format, custom_grid_cols, custom_grid_rows)
+    return resolve_layout_geometry(
+        width_px, height_px, selection,
+        conform_to_layout=conform_to_layout, bias_percent=clamp_conform_bias_percent(bias_percent),
+    )
+
+
+def oriented_source_size(path: Path) -> tuple[int, int]:
+    with Image.open(path) as image:
+        width, height = image.size
+        return (height, width) if image.getexif().get(274) in {5, 6, 7, 8} else (width, height)
+
+
+def render_layout_preview(
+    image: Image.Image,
+    source_size: tuple[int, int],
+    layout: LayoutGeometry,
+    options: TransformCutUiOptions,
+) -> Image.Image:
+    if min(*source_size, *image.size) <= 0:
+        raise ValueError("Source and preview dimensions must be positive.")
+    frame_w, frame_h = layout.size
+    output_size = (
+        max(1, round(frame_w * image.width / source_size[0])),
+        max(1, round(frame_h * image.height / source_size[1])),
+    )
+    transform = options.to_cli_options() if options.enabled else TransformCutOptions()
+    return render_transformed_source(
+        image, transform, frame=layout.frame, source_size=source_size, output_size=output_size,
+    )
+
+
+def clamp_conform_bias_percent(value, default: float | int = 50.0) -> float:  # noqa: ANN001
+    return clamp_expand_bias_percent(value, default)
+
+
 def browse_initial_directory(input_path_value: str) -> str | None:
     if not input_path_value.strip():
         return None
@@ -697,8 +750,11 @@ def sanitize_preview_split_ratio(value) -> float:  # noqa: ANN001
     return ratio
 
 
-def sanitize_expand_bias_percent(value) -> float:  # noqa: ANN001
-    return clamp_expand_bias_percent(value, default=float(DEFAULT_UI_STATE["expand_bias_percent"]))
+def sanitize_conform_bias_percent(value) -> float:  # noqa: ANN001
+    return clamp_conform_bias_percent(value, default=float(DEFAULT_UI_STATE["conform_bias_percent"]))
+
+
+sanitize_expand_bias_percent = sanitize_conform_bias_percent
 
 
 def _coerce_bool(value) -> bool:  # noqa: ANN001
@@ -734,8 +790,10 @@ def sanitize_ui_state(raw: dict | None) -> dict:
     window_geometry = raw.get("window_geometry", state["window_geometry"])
     state["window_geometry"] = sanitize_window_geometry(str(window_geometry) if window_geometry is not None else "")
     state["preview_split_ratio"] = sanitize_preview_split_ratio(raw.get("preview_split_ratio"))
-    state["expand_to_format"] = _coerce_bool(raw.get("expand_to_format", state["expand_to_format"]))
-    state["expand_bias_percent"] = sanitize_expand_bias_percent(raw.get("expand_bias_percent"))
+    state["conform_to_layout"] = _coerce_bool(raw.get("conform_to_layout", raw.get("expand_to_format", False)))
+    state["conform_bias_percent"] = sanitize_conform_bias_percent(
+        raw.get("conform_bias_percent", raw.get("expand_bias_percent")),
+    )
     return state
 
 
@@ -764,6 +822,8 @@ def save_ui_state(
     preview_split_ratio: float | int = 0.5,
     expand_to_format: bool = False,
     expand_bias_percent: float | int = 50.0,
+    conform_to_layout: bool | None = None,
+    conform_bias_percent: float | int | None = None,
 ) -> None:
     state = sanitize_ui_state(
         {
@@ -773,8 +833,8 @@ def save_ui_state(
             "input_dir": input_dir,
             "window_geometry": window_geometry,
             "preview_split_ratio": preview_split_ratio,
-            "expand_to_format": expand_to_format,
-            "expand_bias_percent": expand_bias_percent,
+            "conform_to_layout": expand_to_format if conform_to_layout is None else conform_to_layout,
+            "conform_bias_percent": expand_bias_percent if conform_bias_percent is None else conform_bias_percent,
         }
     )
     try:

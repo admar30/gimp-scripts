@@ -308,8 +308,8 @@ def test_sanitize_ui_state_defaults_on_bad_values() -> None:
     assert state["input_dir"] == ""
     assert state["window_geometry"] == ""
     assert state["preview_split_ratio"] == DEFAULT_UI_STATE["preview_split_ratio"]
-    assert state["expand_to_format"] is DEFAULT_UI_STATE["expand_to_format"]
-    assert state["expand_bias_percent"] == DEFAULT_UI_STATE["expand_bias_percent"]
+    assert state["conform_to_layout"] is DEFAULT_UI_STATE["conform_to_layout"]
+    assert state["conform_bias_percent"] == DEFAULT_UI_STATE["conform_bias_percent"]
 
 
 def test_sanitize_window_geometry_accepts_valid_and_rejects_invalid() -> None:
@@ -332,7 +332,7 @@ def test_sanitize_expand_bias_percent_bounds_and_defaults() -> None:
     assert sanitize_expand_bias_percent(100) == 100.0
     assert sanitize_expand_bias_percent(-5) == 0.0
     assert sanitize_expand_bias_percent(105) == 100.0
-    assert sanitize_expand_bias_percent("bad") == DEFAULT_UI_STATE["expand_bias_percent"]
+    assert sanitize_expand_bias_percent("bad") == DEFAULT_UI_STATE["conform_bias_percent"]
 
 
 def test_expand_helpers_return_expected_axis_and_crop() -> None:
@@ -449,8 +449,8 @@ def test_save_and_load_ui_state_round_trip(monkeypatch: pytest.MonkeyPatch) -> N
     assert loaded["input_dir"] == str(Path("C:/maps").resolve())
     assert loaded["window_geometry"] == "1280x720+80+90"
     assert loaded["preview_split_ratio"] == 0.75
-    assert loaded["expand_to_format"] is True
-    assert loaded["expand_bias_percent"] == 65.0
+    assert loaded["conform_to_layout"] is True
+    assert loaded["conform_bias_percent"] == 65.0
 
 
 def test_load_ui_state_returns_defaults_when_missing(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -607,9 +607,9 @@ def test_build_command_with_expand_args() -> None:
         expand_to_format=True,
         expand_bias_percent=33.5,
     )
-    assert "--expand-to-format" in command
-    assert "--expand-bias-percent" in command
-    bias_index = command.index("--expand-bias-percent")
+    assert "--conform-to-layout" in command
+    assert "--conform-bias-percent" in command
+    bias_index = command.index("--conform-bias-percent")
     assert command[bias_index + 1] == "33.5"
 
 
@@ -685,8 +685,8 @@ def test_build_command_without_expand_args_when_disabled() -> None:
         expand_to_format=False,
         expand_bias_percent=75.0,
     )
-    assert "--expand-to-format" not in command
-    assert "--expand-bias-percent" not in command
+    assert "--conform-to-layout" not in command
+    assert "--conform-bias-percent" not in command
 
 
 def test_transform_helper_parsing_and_preview_block_math() -> None:

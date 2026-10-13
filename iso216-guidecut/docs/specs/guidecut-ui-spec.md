@@ -6,7 +6,7 @@ Date: 2026-10-10
 ## 1. Purpose
 Design a simple desktop UI for running `iso216_guidecut.py` without requiring terminal use.
 
-Current pass covers core run controls, preview integration, and expand-to-format controls.
+Current pass covers core run controls, preview integration, and conform-to-layout controls.
 
 ## 2. Scope (Initial Feature Pass)
 1. File search/input field:
@@ -39,11 +39,12 @@ Current pass covers core run controls, preview integration, and expand-to-format
 8. Session persistence:
 - On app close, persist selected target format, output settings, input-folder context, and window size/desktop location.
 - On next app launch, restore persisted target format, output settings, input-folder context, and window size/desktop location.
-9. Expand-to-format controls:
-- `Expand to Format` toggle in main form.
-- Hidden trim-bias slider shown inline on the same row as the expand toggle when expand is enabled.
+9. Conform to Layout controls:
+- `Conform to Layout` toggle in main form.
+- Hidden trim-bias slider shown inline on the same row as the conformity toggle when conformity is enabled.
 - Slider range `0..100`, default `50.0`.
-- If source has no excess trim axis (already ISO ratio), slider is disabled and shown as no-op.
+- If source has no excess trim axis for the selected layout, slider is disabled and shown as no-op.
+- Custom grids show resolved A4 tile orientation next to `Cols/Rows` while conformity is enabled; the format tooltip includes tile orientation and layout ratio.
 10. Custom-grid mode behavior:
 - First time custom mode is enabled in a session, initialize `Cols/Rows` from current preset grid.
 - Keep current custom values after run completion.
@@ -86,12 +87,12 @@ Current layout in the implemented UI:
 - Inside row 4:
   - rounded output-directory field (expanding left section),
   - `Browse Output...` button (right section).
-5. Row 5: `Expand to Format` row:
-  - left: `Expand to Format` toggle,
-  - right: expand-bias slider cluster (hidden unless expand is enabled).
+5. Row 5: `Conform to Layout` row:
+  - left: `Conform to Layout` toggle,
+  - right: Fill-bias slider cluster (hidden unless conformity is enabled).
 6. Row 6: `Custom Grid` row:
   - left: `Custom Grid` toggle,
-  - right: `Cols` / `Rows` fields (hidden unless custom mode is enabled).
+  - right: `Cols` / `Rows` fields (hidden unless custom mode is enabled), followed by auto tile orientation when conformity is enabled.
 7. Row 7: `Transform Cut` row:
   - left: `Transform Cut` toggle,
   - right: transform controls (`X`, `Y`, `Rot`, `Scale`, `Col`, `Row`, `Reset`, `Select All`) hidden unless transform mode is enabled.
@@ -210,8 +211,8 @@ Current layout in the implemented UI:
   - `Target Format`
   - `Specify output directory` toggle state
   - `Output Directory` value
-  - `Expand to Format` toggle state
-  - `Expand bias percent`
+  - `Conform to Layout` toggle state
+  - `Fill bias percent`
 - `Input File` folder context only (filename is removed before persist)
 - Window geometry (`width x height + x + y`) for size and desktop position
 - Restore these values on startup.
@@ -220,9 +221,9 @@ Current layout in the implemented UI:
 - If persisted data is missing/invalid:
   - fall back to defaults (`A2`, toggle off, empty output directory, empty input-folder context, platform default window placement/size).
 
-### 5.10 Expand-to-Format UX Behavior
+### 5.10 Conform to Layout UX Behavior
 - Toggle off:
-  - expand arguments are not sent to CLI,
+  - conformity arguments are not sent to CLI,
   - slider row stays hidden.
 - Toggle on:
   - slider row is shown,
@@ -231,10 +232,18 @@ Current layout in the implemented UI:
   - `0%` preserves left/top side,
   - `100%` preserves right/bottom side.
 - Document-scoped session behavior:
-  - turning expand off then on for the same selected file retains current bias,
-  - changing the selected input document resets expand toggle to off and bias to `50%`,
-  - after run completion, reset expand toggle to off and bias to `50%` (input filename is already cleared to folder context).
+  - turning conformity off then on for the same selected file retains current bias,
+  - changing the selected input document resets conformity toggle to off and bias to `50%`,
+  - after run completion, reset conformity toggle to off and bias to `50%` (input filename is already cleared to folder context).
 - No per-file cross-restart memory is required.
+- Presets retain existing ISO216 ratio and bisection rules.
+- Custom target ratio is `(cols / rows) * tile_ratio`, where portrait tiles use `1/sqrt(2)` and landscape tiles use `sqrt(2)`.
+- Auto chooses the orientation retaining more source area; ties choose portrait. Source orientation is normalized from EXIF first. Column/row counts do not change.
+- Orientation depends only on original source dimensions and grid, never bias or transforms.
+- Grid/preset changes recompute the frame and trim axis while retaining bias.
+- Invalid/incomplete custom dimensions retain the last valid preview, disable the bias slider, and block Run.
+- Saved `expand_to_format`/`expand_bias_percent` keys migrate to `conform_to_layout`/`conform_bias_percent`; save only canonical names.
+- Fill is the only fitting behaviour in this pass; Fit/padding is deferred.
 
 ### 5.11 Transform-Cut UX Behavior
 - Toggle off:
@@ -244,18 +253,20 @@ Current layout in the implemented UI:
   - transform controls are shown,
   - preview keeps guide/grid layer fixed,
   - preview transforms the source image underneath the fixed guides,
+  - the full source remains available behind the Fill frame, including pixels outside its initial bounds,
+  - zero pan/rotation and scale `1` match ordinary Fill output; bias sets the source anchor and transforms apply on top,
   - all selected blocks are highlighted,
   - a plain click selects only that block and updates `Col` and `Row`,
   - Ctrl+click adds or removes that block without clearing other selections,
   - editing `Col` or `Row` selects the entered block alone,
   - `Select All` selects every block in the current grid,
-  - left click and drag pans the source image in the same direction as the pointer, with offsets measured in original working-image pixels,
+  - left click and drag pans the source image in the same direction as the pointer, with offsets measured in original source pixels,
   - right click and drag rotates the source; right/down is clockwise and left/up is counterclockwise,
   - scrolling up zooms in and scrolling down zooms out, updating `Scale`,
   - rotation and scaling keep the source point beneath the preview centre stationary, including when `Rot` or `Scale` is edited directly,
   - `X` and `Y` are adjusted automatically on rotation/scale changes so preview and exported PDF use the same anchored transform,
   - mouse manipulation updates the corresponding `X`, `Y`, `Rot`, and `Scale` controls live,
-  - when expand-to-format is also active, left drag pans the source instead of changing trim bias; the trim-bias slider remains available,
+  - when conform-to-layout is also active, left drag pans the source instead of changing trim bias; the trim-bias slider remains available,
   - run exports selected blocks as pages in one PDF, ordered top-to-bottom then left-to-right, regardless of selection order,
   - an empty selection is allowed while editing but blocks Run with a clear error.
 - Defaults:
@@ -267,6 +278,7 @@ Current layout in the implemented UI:
   - `Row = 0`
 - Transform values are session controls and are not persisted across app restart.
 - Selected block coordinates are zero-based from top-left guide space and must be valid for the current resolved grid. Selections outside a changed grid are removed; if a nonempty selection would become empty, the first block is selected.
+- Reset restores transform defaults and first-block selection without changing layout or bias.
 
 ## 6. Script Integration Contract
 Base command form:
@@ -281,10 +293,10 @@ With explicit output directory enabled:
 python iso216_guidecut.py "<input_path>" "<target_format>" --output "<output_path>"
 ```
 
-With expand mode enabled:
+With conformity enabled:
 
 ```powershell
-python iso216_guidecut.py "<input_path>" "<target_format>" --expand-to-format --expand-bias-percent "<0..100>"
+python iso216_guidecut.py "<input_path>" "<target_format>" --conform-to-layout --conform-bias-percent "<0..100>"
 ```
 
 With custom-grid mode enabled:
@@ -306,7 +318,7 @@ Execution details:
 - Output path construction when explicit output directory is provided:
   - `<output_dir>\<input-stem>-guidecut-<target-format>-<YYYYMMDD-HHMMSS>.pdf`
 - If explicit output-directory field is empty, do not pass `--output`; use script default location (source file directory).
-- Pass expand args only when expand toggle is enabled.
+- Pass conformity args only when conformity toggle is enabled.
 - Pass transform args and one `--block` per selected block only when transform toggle is enabled.
 - Pass either preset target argument or custom grid args, never both.
 - Exit code handling:
@@ -347,7 +359,7 @@ Execution details:
 11. A simple usage instruction block is visible above the input field.
 12. After app restart, target format, output settings, and input-folder context are restored from previous session.
 13. After app restart, window size and desktop location are restored from previous session when valid persisted geometry exists.
-14. Enabling `Expand to Format` reveals bias slider and running passes expand args to CLI.
+14. Enabling `Conform to Layout` reveals bias slider and running passes conformity args to CLI.
 15. Bias slider and preview interactions stay synchronized for the active document (document change and post-run reset behavior are enforced).
 16. Enabling `Transform Cut` reveals transform controls and running passes transform args to CLI.
 17. With `Transform Cut` enabled, preview highlights all selected blocks; plain click replaces the selection, Ctrl+click toggles one block, and `Select All` selects the grid.

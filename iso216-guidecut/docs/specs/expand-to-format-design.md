@@ -1,234 +1,101 @@
-# Guidecut Expand-to-Format Design
+# Guidecut Conform to Layout Design
 
-Status: Draft v0.1  
-Date: 2026-05-30
+Status: Implemented
 
-## 1. Purpose
-Add an optional "Expand to Format" mode that crops non-ISO-ratio source files to ISO216 aspect ratio before guide generation/export.
+Date: 2026-10-13
 
-This solves cases where input files include dead space and users want control over which edge loses more content.
+This document replaces the original Expand to Format design. Its filename is retained so existing references continue to resolve.
 
-## 2. User-Facing Requirements
-1. Add a new UI toggle: `Expand to Format`.
-2. When enabled, crop source area to ISO216 ratio before guide/tile generation.
-3. Cropping bias is controlled by a hidden slider:
-- default `50%` (center crop),
-- adjustable from one side to the opposite side on the excess axis.
-4. When disabled, behavior returns to current default (no pre-crop).
-5. In preview mode, user can drag the preview image along the excess axis:
-- dragging updates crop bias,
-- slider and preview remain synchronized.
+## 1. Scope
 
-## 3. Terminology
-1. **Expand to Format**: UI label only. Implementation is a pre-crop to ISO ratio (no canvas extension).
-2. **Excess axis**: axis trimmed to reach target ISO ratio.
-3. **Bias percent**: percent of total trim removed from the "leading" edge:
-- horizontal trim: leading edge = left,
-- vertical trim: leading edge = top.
+One `Conform to Layout` toggle provides Fill for preset formats and custom grids. Fill trims the selected cutting frame without stretching the source. Fit/padding and manual tile-orientation overrides are deferred. This pass covers the Python CLI and desktop UI.
 
-## 4. Target Ratio Rules
-ISO216 uses a long-side/short-side ratio of `sqrt(2)`.
+## 2. Layout Resolution
 
-For a source image `(width, height)`:
-1. Preserve detected orientation (landscape/portrait/square).
-2. Compute target width/height ratio for that orientation:
-- landscape: `target_ratio = sqrt(2)` (`width / height`),
-- portrait/square: `target_ratio = 1 / sqrt(2)`.
-3. Crop only one axis to satisfy the ratio:
-- if source is too wide, trim width,
-- if source is too tall, trim height.
+Resolve geometry from the original source dimensions after EXIF orientation normalization.
 
-## 5. Crop Geometry
-Given:
-- source size `(W, H)`,
-- target ratio `R = target_width / target_height`,
-- bias `P` in `[0, 100]`.
+Preset targets preserve the existing canvas ratio and alternating bisection rules:
+- Landscape source: canvas ratio `sqrt(2)`.
+- Portrait/square source: canvas ratio `1/sqrt(2)`.
+- Retain the existing near-ISO ratio tolerance for preset inputs.
 
-### 5.1 Determine retained dimensions
-1. If `W / H > R` (too wide):
-- `new_h = H`
-- `new_w = round(H * R)`
-- `excess = W - new_w` (horizontal trim)
-2. Else if `W / H < R` (too tall):
-- `new_w = W`
-- `new_h = round(W / R)`
-- `excess = H - new_h` (vertical trim)
-3. Else:
-- already matching ratio, `excess = 0`, no-op crop.
+For a custom grid `C x R`, evaluate:
+- Portrait A4-shaped tiles: layout ratio `(C/R)/sqrt(2)`.
+- Landscape A4-shaped tiles: layout ratio `(C/R)*sqrt(2)`.
 
-### 5.2 Bias to crop edges
-1. `leading_trim = round(excess * (P / 100.0))`
-2. `trailing_trim = excess - leading_trim`
+For source ratio `S` and candidate ratio `T`, retained area fraction is `min(S/T, T/S)`. Choose the higher score, with portrait winning ties within `1e-12`. The original column/row counts stay fixed. Bias, pan, rotation and scale do not influence the orientation decision.
 
-Crop rectangle:
-1. Horizontal trim:
-- `x0 = leading_trim`, `x1 = W - trailing_trim`, `y0 = 0`, `y1 = H`
-2. Vertical trim:
-- `x0 = 0`, `x1 = W`, `y0 = leading_trim`, `y1 = H - trailing_trim`
+`LayoutGeometry` contains columns, rows, target ratio, tile orientation and a `FillCrop`. Its frame rectangle is expressed in original source pixels, and its size defines guide space. Reject a frame smaller than its grid counts to prevent empty cells.
 
-Default `P = 50` yields centered crop.
+## 3. Fill and Bias
 
-## 6. CLI Contract Changes
-File: `iso216-guidecut/cli/iso216_guidecut.py`
+For source dimensions `(W,H)` and target ratio `T`:
+- Too wide: retain `(round(H*T), H)`.
+- Too tall: retain `(W, round(W/T))`.
+- Integer rounding yielding no excess is a no-op.
 
-Add optional args:
-1. `--expand-to-format` (flag)
-2. `--expand-bias-percent <float>` (default `50.0`)
+Clamp UI bias to `[0,100]`; the CLI rejects nonnumeric, nonfinite and out-of-range values.
+- `0%`: preserve left/top; trim the right/bottom edge.
+- `50%`: split trim between opposite edges.
+- `100%`: preserve right/bottom; trim the left/top edge.
 
-Rules:
-1. If `--expand-to-format` is not set, ignore bias and keep current behavior.
-2. Validate bias range `[0, 100]`; out-of-range is a clear non-zero error.
-3. If enabled:
-- compute crop rect,
-- crop working image before grid/guides/tile computation,
-- run existing guide/tile flow on cropped image.
+`leading_trim = round(excess * bias / 100)` and `trailing_trim = excess - leading_trim`. This defines a frame into the full source, rather than an irreversible cropped working image.
 
-Logging:
-1. Emit crop summary in non-quiet mode:
-- axis trimmed,
-- original size,
-- cropped size,
-- bias percent.
+## 4. Full-Source Transform Rendering
 
-## 7. App/Runner Contract Changes
-File: `iso216-guidecut/app/guidecut_runner.py`
+Keep the full source bitmap. Let `F` be the frame dimensions, `A` the source-space frame centre, `t` the pan offset and `s` the zoom factor. Each guide-space output point samples:
 
-### 7.1 Build command support
-Extend `build_command(...)` with:
-1. `expand_to_format: bool = False`
-2. `expand_bias_percent: float = 50.0`
-
-When enabled, append:
 ```text
---expand-to-format --expand-bias-percent <value>
+source_point = A + inverse_rotation(output_point - F/2 - t) / s
 ```
 
-### 7.2 Shared crop math helpers
-Add pure helpers for UI + tests:
-1. `compute_expand_crop_rect(width_px, height_px, bias_percent) -> RectLike`
-2. `expand_excess_axis(width_px, height_px) -> "x" | "y" | None`
-3. `clamp_expand_bias(value) -> float`
+With zero pan/rotation and scale `1`, this samples the same pixels as ordinary Fill cropping. Panning can bring content outside the original frame into view. Bias defines the base anchor; transforms apply on top of it.
 
-These helpers let preview and CLI share identical geometry behavior.
+The renderer accepts a frame independent of source dimensions. Export samples each selected tile directly, avoiding a full-resolution transformed canvas. Ordinary export crops source rectangles translated by the frame origin.
 
-### 7.3 Persisted UI state additions
-Extend `DEFAULT_UI_STATE` and sanitize/load/save:
-1. `expand_to_format: bool` (default `False`)
-2. `expand_bias_percent: float` (default `50.0`)
+The desktop UI adjusts X/Y during rotation and scale changes to keep the source point beneath the preview centre fixed. Reset clears transform values and selects the first block without changing layout or bias. Manual transforms retain the existing out-of-source blank/transparent fill behaviour.
 
-## 8. UI Changes
-File: `iso216-guidecut/app/guidecut_ui.py`
+## 5. CLI and Runner
 
-## 8.1 New controls
-1. Add `Expand to Format` toggle.
-2. Add hidden slider row shown only when toggle is enabled.
-3. Slider range `0..100`, default `50`.
-4. Slider label should describe active trim axis when known:
-- horizontal trim: `Left/Right Trim`
-- vertical trim: `Top/Bottom Trim`
+Canonical options:
 
-## 8.2 Behavior
-1. Toggle off:
-- hide slider,
-- use uncropped source for run + preview.
-2. Toggle on:
-- show slider,
-- crop applies to run + preview.
-3. If input is missing/invalid:
-- keep slider hidden or disabled to avoid ambiguous state.
-4. If no excess exists for selected source:
-- slider disabled (or remains visible with note: "No trim needed").
+```text
+--conform-to-layout
+--conform-bias-percent <0..100>
+```
 
-## 8.3 Run integration
-`_resolve_run_inputs` and command construction pass new options into `build_command`.
+Legacy `--expand-to-format` and `--expand-bias-percent` are aliases for the same layout-aware behaviour. In particular, legacy custom-grid calls now conform to the grid rather than the whole-image ISO ratio.
 
-## 9. Preview Integration
-File: `iso216-guidecut/app/guidecut_ui.py`
+The runner emits canonical options. Shared helpers resolve layout geometry, read oriented source dimensions and render previews. Existing preset crop helpers remain available for compatibility.
 
-## 9.1 Render model
-When expand mode is on:
-1. Compute crop rect on source pixels using shared helper.
-2. Preview should represent the cropped result area.
-3. Guide overlay uses cropped dimensions (not original source dimensions).
+CLI logs report Fill dimensions, bias/trim and auto custom tile orientation. PDF naming, metadata handling and top-to-bottom/left-to-right ordering remain as specified by the main tool spec.
 
-## 9.2 Drag-to-adjust behavior
-Drag only when:
-1. preview visible,
-2. expand mode enabled,
-3. source loaded,
-4. excess axis exists.
+## 6. Desktop UI
 
-Bindings on preview canvas:
-1. `<ButtonPress-1>`: start drag (capture start bias and pointer position)
-2. `<B1-Motion>`: update bias continuously
-3. `<ButtonRelease-1>`: finalize bias
+- Replace `Expand to Format` with `Conform to Layout` in the existing row.
+- Keep the inline bias slider and axis-specific label beside the toggle.
+- Show `Tiles: Portrait (Auto)` or `Tiles: Landscape (Auto)` beside custom Cols/Rows while conformity is enabled.
+- Include auto orientation and layout ratio in the custom-grid tooltip.
+- Disable bias when no trim is needed or no valid source/layout exists.
+- Source, preset, custom-grid or conformity changes recompute geometry; layout changes retain the same numeric bias.
+- Incomplete custom-grid entry retains the last valid preview and blocks Run. Do not substitute an ISO crop.
+- Left drag adjusts bias outside Transform Cut. In Transform Cut, left drag pans the full source; right drag rotates and wheel zooms.
+- Keep valid selected blocks across grid changes under existing selection rules.
 
-Mapping:
-1. Convert pointer delta in preview pixels to source-pixel offset using current preview scale.
-2. Clamp effective leading trim to `[0, excess]`.
-3. Convert back to bias percent:
-- `bias = (leading_trim / excess) * 100`.
-4. Update slider variable from drag and re-render preview.
+## 7. Preview and Performance
 
-Direction conventions:
-1. Horizontal trim: dragging image right increases left trim.
-2. Vertical trim: dragging image down increases top trim.
+Retain the complete bounded preview bitmap. Compose original-pixel guide-to-source sampling with thumbnail scaling, rather than cropping the thumbnail before transforms. This keeps preview and export geometry aligned despite thumbnail rounding.
 
-## 9.3 Slider/drag synchronization
-1. Slider change updates preview crop immediately.
-2. Drag updates slider live.
-3. Keep one source of truth: `expand_bias_percent`.
+Cache rendered preview content by source identity, original dimensions, frame rectangle and transform values. Use frame dimensions for guides, block selection and pan units. Retain adaptive guide contrast and deferred recomputation after resize/drag settles. Preserve preview opening, splitter resizing and collapse behaviour.
 
-## 10. Reliability and Performance
-1. Reuse existing preview debounce pattern where possible.
-2. Recompute crop geometry cheaply (pure math only).
-3. Avoid blocking UI thread with heavy image operations outside existing preview flow.
-4. Preserve existing preview contrast behavior after crop mapping.
+## 8. State and Reset Rules
 
-## 11. Edge Cases
-1. Already ISO-ratio image:
-- no excess trim; crop is full image.
-2. Very small images:
-- ensure computed retained dimensions remain >= 1 pixel.
-3. Bias endpoints:
-- `0%`: all trim from trailing edge,
-- `100%`: all trim from leading edge.
-4. Square images:
-- treat as portrait orientation baseline for target ratio selection.
-5. Expand toggle on + preview off:
-- feature still applies to run output.
+Persist `conform_to_layout` and `conform_bias_percent`. Read legacy `expand_to_format` and `expand_bias_percent` when canonical fields are absent; canonical values take precedence. Save only canonical fields. Tile orientation is derived and not persisted.
 
-## 12. Test Plan
-## 12.1 CLI/unit tests (`tests/test_iso216_guidecut.py`)
-1. Crop rect math for:
-- too wide source,
-- too tall source,
-- near-ratio/no-op.
-2. Bias mapping:
-- 0, 50, 100 endpoints.
-3. Grid/tile count unchanged by expand flag for same target format.
-4. Exported page dimensions reflect cropped working canvas.
+Off/on retains bias for the same document. Changing documents or completing a run resets conformity off and bias to `50%`. No per-file cross-restart memory is added.
 
-## 12.2 Runner tests (`tests/test_guidecut_runner.py`)
-1. `build_command` includes expand args only when enabled.
-2. Bias sanitization/clamping.
-3. UI state save/load roundtrip includes expand settings.
+## 9. Verification
 
-## 12.3 UI smoke coverage
-1. Toggle visibility and slider hide/show.
-2. Slider affects preview crop.
-3. Drag affects slider value and preview crop.
-4. Toggle off resets to uncropped preview/rendering behavior.
+Cover preset regression, auto portrait/landscape and deterministic ties, biased frames, matched/no-op layouts, pixel partitions and undersized frames. Verify default transforms equal ordinary Fill, panning recovers excluded source pixels, thumbnail sampling matches export coordinates and centre-anchored rotation/zoom survives biased frames.
 
-## 13. Implementation Sequence
-1. Add crop math + CLI args in `cli/iso216_guidecut.py`.
-2. Add shared runner helpers and command/state support in `app/guidecut_runner.py`.
-3. Add UI toggle + slider and run integration in `app/guidecut_ui.py`.
-4. Add preview crop render + drag interaction in `app/guidecut_ui.py`.
-5. Add/adjust tests.
-6. Update `iso216-guidecut/README.md` and relevant specs with final user-facing behavior.
-
-## 14. Out of Scope (This Pass)
-1. Rotation/orientation override controls.
-2. Multi-page source document independent trim per page.
-3. Arbitrary custom target aspect ratios beyond ISO216.
+Verify canonical/legacy CLI options, state migration, custom validation, UI visibility/reset behaviour, adaptive guides, preview reopening and row-major selected-page export. Run the existing Python suite and live Tk/PDF smoke checks.

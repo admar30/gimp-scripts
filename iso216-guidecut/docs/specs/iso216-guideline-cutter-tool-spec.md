@@ -34,18 +34,20 @@ The source file may have non-standard internal dimensions. The tool does not rej
 - Allowed integer range per dimension: `1..32`.
 - Preset and custom modes are mutually exclusive.
 
-### 3.3 Optional Expand-to-Format Parameters
-- `--expand-to-format` (boolean flag)
-- `--expand-bias-percent <0..100>` (float, default `50.0`)
+### 3.3 Optional Conform to Layout Parameters
+- `--conform-to-layout` (boolean flag)
+- `--conform-bias-percent <0..100>` (float, default `50.0`)
+- Legacy aliases: `--expand-to-format` and `--expand-bias-percent`, using the same layout-aware behaviour.
 
 Behavior:
-- When expand mode is enabled, pre-crop source to ISO216 aspect ratio before guide/grid/tile math.
+- When conformity is enabled, resolve a Fill frame matching the selected layout before guide/grid/tile math.
+- Presets preserve the existing ISO216 canvas ratio. Custom grids choose portrait or landscape A4-shaped tiles to maximize retained source area; ties choose portrait and grid counts remain unchanged.
 - Bias semantics:
   - `0%`: preserve left/top side content (trim accumulates on right/bottom).
   - `100%`: preserve right/bottom side content (trim accumulates on left/top).
   - `50%`: center trim split.
-- If the source already matches ISO ratio (or no excess trim axis exists), no crop is applied.
-- Expand args are ignored unless `--expand-to-format` is set.
+- If the source already matches the selected layout ratio (or pixel rounding yields no excess), no trim is applied.
+- Conform args are ignored unless `--conform-to-layout` is set.
 
 ### 3.3.1 Optional Transform-Cut Parameters
 - `--transform-cut` (boolean flag)
@@ -60,15 +62,15 @@ Behavior:
 Behavior:
 - Guides/grid remain a fixed cutting frame.
 - The source image is transformed underneath that fixed frame.
-- Transform origin is the source image center.
-- The desktop UI compensates `offset-x`/`offset-y` during rotation and scaling so the source point under the fixed preview centre remains stationary; direct CLI parameters retain the source-centred transform model.
+- Transform origin is the bias-selected Fill frame centre, or the source centre when conformity is off.
+- The desktop UI compensates `offset-x`/`offset-y` during rotation and scaling so the source point under the fixed preview centre remains stationary.
 - `offset-x` and `offset-y` pan the transformed image in guide-space pixels.
 - `rotation-deg` rotates the source in the 2D plane.
 - `scale` is uniform image zoom.
 - When enabled, export all selected blocks as pages of one PDF. A single selected block produces one page.
 - Sort selected blocks top-to-bottom then left-to-right and ignore duplicate coordinates.
 - If any selected block is outside the resolved grid, fail with a clear error. An empty selection is invalid.
-- Transform mode is compatible with preset grids, custom grids, and expand-to-format. Expand pre-crop is applied before transform rendering.
+- Transform mode is compatible with preset grids, custom grids, and conformity. Retain the full source and sample it through the Fill frame, allowing trimmed pixels to be panned back into view. Default transforms match ordinary Fill output.
 
 ### 3.4 Backend Requirement
 - GIMP is not required.
@@ -77,9 +79,9 @@ Behavior:
 
 ## 4. Functional Requirements
 ### 4.1 High-Level Flow
-1. Load source file via the selected image backend (default: Pillow).
-2. If expand mode is enabled, compute and apply pre-crop rectangle to enforce ISO216 ratio.
-3. Detect orientation from working dimensions (cropped dimensions when expand is enabled).
+1. Load the first source frame via the selected image backend (default: Pillow) and normalize EXIF orientation.
+2. Resolve the layout, choosing auto A4 tile orientation for conformed custom grids.
+3. Compute the bias-positioned Fill frame, retaining the complete source bitmap.
 4. Resolve grid:
 - preset mode: compute bisection grid from `target_format` and orientation.
 - custom mode: use explicit `cols x rows`.
@@ -88,16 +90,18 @@ Behavior:
 7. If transform-cut mode is disabled, export all tiles into one multi-page PDF with deterministic page ordering.
 8. If transform-cut mode is enabled, render each selected block from the transformed source underneath the fixed guide frame and export those pages in row-major order.
 
-### 4.1.1 Expand-to-Format Crop Math
+### 4.1.1 Conform to Layout Crop Math
 - Determine working target ratio from source orientation:
   - landscape source: `sqrt(2):1`
   - portrait/square source: `1:sqrt(2)`
+- For custom grids, evaluate `(cols / rows) / sqrt(2)` and `(cols / rows) * sqrt(2)` instead. Retained area fraction for source ratio `S` and target ratio `R` is `min(S/R, R/S)`; choose the higher score and portrait for ties within `1e-12`.
+- Auto orientation does not depend on bias, pan, rotation or scale.
 - Detect excess axis:
   - too wide -> trim on `x`
   - too tall -> trim on `y`
 - Compute retained crop dimension that best matches target ratio.
-- Split excess trim using `expand_bias_percent`.
-- Apply the resulting crop rectangle before all grid/guide/page calculations.
+- Split excess trim using `conform_bias_percent`.
+- Use the resulting frame dimensions for all grid/guide/page calculations. Sample tiles from the full source; never pre-trim pixels needed by transforms.
 
 ### 4.2 Orientation Detection
 Implement a dedicated function before guide placement:
@@ -186,7 +190,8 @@ Hard failures (non-zero exit):
 - Neither grid mode selected.
 - Conflicting grid mode inputs (preset + custom together).
 - Invalid custom-grid dimensions.
-- Invalid `--expand-bias-percent` value (outside `[0,100]` or non-numeric).
+- Cutting frame too small to provide at least one pixel in each grid cell.
+- Invalid `--conform-bias-percent` value (outside `[0,100]` or non-numeric).
 - Invalid transform numeric value.
 - Invalid selected transform block coordinate for resolved grid.
 - Mixing repeated `--block` with legacy `--block-col` / `--block-row`.
@@ -204,9 +209,9 @@ Soft warnings (continue):
 4. `compute_guides(width_px: int, height_px: int, cols: int, rows: int) -> (v_guides, h_guides)`
 5. `compute_tile_crop(col_ltr: int, row_ttb: int, cols: int, rows: int, width_px: int, height_px: int) -> Rect`
 6. `ordered_tiles(cols: int, rows: int) -> list[(col_ltr, row_ttb)]`  (row-major: top-to-bottom, left-to-right)
-7. `clamp_expand_bias_percent(value: float|int, default=50.0) -> float`
-8. `parse_expand_bias_percent(value) -> float`
-9. `compute_expand_crop_rect(width_px: int, height_px: int, bias_percent: float|int) -> ExpandCrop`
+7. `clamp_conform_bias_percent(value: float|int, default=50.0) -> float`
+8. `parse_conform_bias_percent(value) -> float`
+9. `compute_fill_crop_rect(width_px, height_px, target_ratio, bias_percent) -> FillCrop`
 10. `resolve_grid_selection(target_format, grid_cols, grid_rows) -> GridSelection`
 11. `build_output_path(input_path: str, target_token: str, now_local: datetime) -> output_pdf_path`
 12. `export_tiles_to_multipage_pdf(image, ordered_rects, output_path, preserve_profile=True, preserve_metadata=True, transform_options=None) -> None`
@@ -216,6 +221,7 @@ Soft warnings (continue):
 16. `selected_block_output_token(base_token, block_col, block_row) -> str`
 17. `ordered_selected_blocks(blocks, cols, rows) -> list[(col, row)]`
 18. `selected_blocks_output_token(base_token, blocks) -> str`
+19. `resolve_layout_geometry(width_px, height_px, selection, conform_to_layout=False, bias_percent=50) -> LayoutGeometry`
 
 ## 7. Non-Functional Requirements
 - Deterministic output naming and page ordering.
@@ -230,12 +236,14 @@ Soft warnings (continue):
 4. Guides are created at the expected bisection positions.
 5. Orientation detection changes split axis selection correctly for odd split counts (`a3`, `a1`).
 6. Color profile and metadata are preserved when supported; warnings are logged otherwise.
-7. When expand mode is enabled, crop occurs before guide/grid computation and output geometry reflects cropped dimensions.
-8. Expand bias endpoints are correct (`0%` left/top anchored, `100%` right/bottom anchored).
+7. When conformity is enabled, frame resolution occurs before guide/grid computation and output geometry reflects frame dimensions.
+8. Fill bias endpoints are correct (`0%` left/top anchored, `100%` right/bottom anchored).
 9. Custom grid mode produces exactly `cols*rows` pages and guide counts (`cols-1`, `rows-1`).
 10. Transform-cut mode exports exactly one page per selected block in row-major order.
 11. Single-block names include `block-<col>-<row>`; multi-block names include `blocks-<count>`.
 12. Transform-cut mode leaves default multi-page output unchanged when disabled.
+13. Conformed custom grids choose auto tile orientation maximizing retained content and retain the entered grid counts.
+14. Transform Cut can recover pixels outside the initial Fill frame by panning; preview and exported pages share the same geometry.
 
 ## 9. Test Plan
 ### 9.1 Unit Tests
@@ -245,9 +253,9 @@ Soft warnings (continue):
 - Guide position math
 - Page ordering generation (row-major: top-to-bottom, left-to-right)
 - Filesystem-safe output filename generation
-- Expand crop rectangle math for too-wide/too-tall sources
-- Expand bias endpoint and clamping behavior (`0`, `50`, `100`)
-- Expand no-op behavior for already ISO-ratio sources
+- Fill frame rectangle math for too-wide/too-tall sources
+- Fill bias endpoint and clamping behavior (`0`, `50`, `100`)
+- Fill no-op behaviour for matched preset/custom layouts
 - Custom grid mode selection/validation and conflict handling
 - Custom output token naming (`grid-CxR`)
 - Transform-cut numeric parsing, output token naming, and selected block validation
@@ -260,8 +268,8 @@ Soft warnings (continue):
 - Verify PDF page count, page order, and bounding geometry
 - Verify output PDF location (beside source)
 - Verify metadata/profile preservation path on supported sample files
-- Verify expand-on run uses cropped working geometry for tile/page boundaries
-- Verify expand-off run behavior remains unchanged from baseline
+- Verify conformity-on run uses Fill frame dimensions for tile/page boundaries while retaining the full source
+- Verify conformity-off run behavior remains unchanged from baseline
 - Verify transform-cut run exports one page per selected block in row-major order
 - Verify transform-cut invalid block coordinate fails
 
@@ -269,4 +277,4 @@ Soft warnings (continue):
 - Timestamp format remains filesystem-safe
 - Page order remains top-to-bottom, left-to-right across all targets
 - Non-ISO source dimensions still process without hard failure
-- Expand arguments are only applied when `--expand-to-format` is explicitly enabled
+- Conformity arguments are only applied when `--conform-to-layout` is explicitly enabled

@@ -23,22 +23,23 @@ from guidecut_runner import (
     browse_initial_directory,
     build_command,
     build_output_pdf_path,
-    clamp_expand_bias_percent,
+    clamp_conform_bias_percent,
     choose_guide_style,
+    compute_guides,
     effective_preview_state,
-    expand_crop_for_source,
+    layout_for_source,
     load_ui_state,
     normalize_target_format,
     offsets_for_preview_center_pivot,
     open_folder,
     ordered_selected_blocks,
+    oriented_source_size,
     pan_offsets_from_preview_drag,
     parse_transform_cut_options,
     preset_grid_for_orientation,
     preview_block_for_point,
-    preview_guides_for_source,
     retained_input_value_after_run,
-    render_transformed_source,
+    render_layout_preview,
     resolve_custom_grid,
     resolve_existing_input_file,
     resolve_open_folder,
@@ -48,8 +49,6 @@ from guidecut_runner import (
     sample_line_luminance,
     save_ui_state,
     scale_from_preview_scroll,
-    scaled_preview_crop_box,
-    scale_transform_for_preview,
     selected_block_rect_for_grid,
     tooltip_text_for_custom_grid,
     tooltip_text_for_format,
@@ -75,7 +74,7 @@ GUIDE_DASH_PATTERN = (6, 4)
 GUIDE_STROKE_WIDTH = 1
 GUIDE_HALO_WIDTH = 3
 ENABLE_ADAPTIVE_GUIDE_CONTRAST = True
-EXPAND_DEFAULT_BIAS_PERCENT = 50.0
+CONFORM_DEFAULT_BIAS_PERCENT = 50.0
 
 
 class HoverTooltip:
@@ -461,12 +460,13 @@ class GuidecutApp(tk.Tk):
         self.custom_grid_var = tk.BooleanVar(value=False)
         self.custom_cols_var = tk.StringVar(value="")
         self.custom_rows_var = tk.StringVar(value="")
+        self.custom_tile_orientation_var = tk.StringVar(value="")
         self.specify_output_var = tk.BooleanVar(value=False)
         self.output_dir_var = tk.StringVar()
         self.show_preview_var = tk.BooleanVar(value=False)
-        self.expand_to_format_var = tk.BooleanVar(value=False)
-        self.expand_bias_var = tk.DoubleVar(value=EXPAND_DEFAULT_BIAS_PERCENT)
-        self.expand_bias_label_var = tk.StringVar(value="Trim bias: 50.0%")
+        self.conform_to_layout_var = tk.BooleanVar(value=False)
+        self.conform_bias_var = tk.DoubleVar(value=CONFORM_DEFAULT_BIAS_PERCENT)
+        self.conform_bias_label_var = tk.StringVar(value="Trim bias: 50.0%")
         self.transform_cut_var = tk.BooleanVar(value=False)
         self.transform_offset_x_var = tk.StringVar(value="0")
         self.transform_offset_y_var = tk.StringVar(value="0")
@@ -503,12 +503,12 @@ class GuidecutApp(tk.Tk):
         self._cached_guide_styles: list[tuple[str, str | None]] = []
         self._custom_grid_initialized = False
         self._active_input_document: str | None = None
-        self._expand_drag_active = False
-        self._expand_drag_axis: str | None = None
-        self._expand_drag_start_pointer = 0
-        self._expand_drag_start_leading_trim = 0
-        self._expand_drag_excess = 0
-        self._expand_drag_display_length = 0
+        self._conform_drag_active = False
+        self._conform_drag_axis: str | None = None
+        self._conform_drag_start_pointer = 0
+        self._conform_drag_start_leading_trim = 0
+        self._conform_drag_excess = 0
+        self._conform_drag_display_length = 0
         self._last_preview_crop_info = None
         self._last_preview_display_box = (0, 0, 0, 0)
         self._last_preview_working_size = (0, 0)
@@ -539,10 +539,10 @@ class GuidecutApp(tk.Tk):
         self.transform_block_col_var.trace_add("write", self._on_transform_block_fields_changed)
         self.transform_block_row_var.trace_add("write", self._on_transform_block_fields_changed)
         self._toggle_output_controls()
-        self._toggle_expand_controls()
+        self._toggle_conform_controls()
         self._toggle_custom_grid_controls()
         self._toggle_transform_controls()
-        self._sync_expand_document_state()
+        self._sync_conform_document_state()
         self._sync_preview_controls()
         self._apply_persisted_window_geometry()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -679,31 +679,31 @@ class GuidecutApp(tk.Tk):
         self.output_browse.grid(row=0, column=1, padx=(SPACING["sm"], 0))
         self.output_row.grid_remove()
 
-        self.expand_toggle = ttk.Checkbutton(
+        self.conform_toggle = ttk.Checkbutton(
             panel,
-            text="Expand to Format",
-            variable=self.expand_to_format_var,
-            command=self._on_expand_toggle,
+            text="Conform to Layout",
+            variable=self.conform_to_layout_var,
+            command=self._on_conform_toggle,
         )
-        self.expand_toggle.grid(row=5, column=0, sticky="w", pady=(0, SPACING["sm"]))
+        self.conform_toggle.grid(row=5, column=0, sticky="w", pady=(0, SPACING["sm"]))
 
-        self.expand_row = ttk.Frame(panel, style="Panel.TFrame")
-        self.expand_row.grid(row=5, column=1, columnspan=2, sticky="ew", pady=(0, SPACING["sm"]))
-        self.expand_row.columnconfigure(1, weight=1)
-        self.expand_bias_label = ttk.Label(self.expand_row, text="Trim Bias", style="Form.TLabel")
-        self.expand_bias_label.grid(row=0, column=0, sticky="w", padx=(0, SPACING["sm"]))
-        self.expand_scale = ttk.Scale(
-            self.expand_row,
+        self.conform_row = ttk.Frame(panel, style="Panel.TFrame")
+        self.conform_row.grid(row=5, column=1, columnspan=2, sticky="ew", pady=(0, SPACING["sm"]))
+        self.conform_row.columnconfigure(1, weight=1)
+        self.conform_bias_label = ttk.Label(self.conform_row, text="Trim Bias", style="Form.TLabel")
+        self.conform_bias_label.grid(row=0, column=0, sticky="w", padx=(0, SPACING["sm"]))
+        self.conform_scale = ttk.Scale(
+            self.conform_row,
             orient=tk.HORIZONTAL,
             from_=0.0,
             to=100.0,
-            variable=self.expand_bias_var,
-            command=self._on_expand_bias_scale,
+            variable=self.conform_bias_var,
+            command=self._on_conform_bias_scale,
         )
-        self.expand_scale.grid(row=0, column=1, sticky="ew")
-        self.expand_bias_value = ttk.Label(self.expand_row, textvariable=self.expand_bias_label_var, style="Help.TLabel")
-        self.expand_bias_value.grid(row=0, column=2, sticky="e", padx=(SPACING["sm"], 0))
-        self.expand_row.grid_remove()
+        self.conform_scale.grid(row=0, column=1, sticky="ew")
+        self.conform_bias_value = ttk.Label(self.conform_row, textvariable=self.conform_bias_label_var, style="Help.TLabel")
+        self.conform_bias_value.grid(row=0, column=2, sticky="e", padx=(SPACING["sm"], 0))
+        self.conform_row.grid_remove()
 
         self.custom_grid_toggle = ttk.Checkbutton(
             panel,
@@ -765,6 +765,11 @@ class GuidecutApp(tk.Tk):
         )
         self.custom_rows_entry.pack(fill="x", expand=True, padx=SPACING["sm"], pady=SPACING["xs"])
         self.custom_rows_field.bind_focus_widget(self.custom_rows_entry)
+        self.custom_tile_orientation_label = ttk.Label(
+            self.custom_grid_row, textvariable=self.custom_tile_orientation_var, style="Help.TLabel",
+        )
+        self.custom_tile_orientation_label.grid(row=0, column=4, padx=(SPACING["sm"], 0))
+        self.custom_tile_orientation_label.grid_remove()
         self.custom_grid_row.grid_remove()
 
         self.transform_toggle = ttk.Checkbutton(
@@ -979,7 +984,16 @@ class GuidecutApp(tk.Tk):
             custom_grid = self._active_custom_grid_values(strict=False)
             if custom_grid is None:
                 return tooltip_text_for_custom_grid(None, None)
-            return tooltip_text_for_custom_grid(custom_grid[0], custom_grid[1])
+            text = tooltip_text_for_custom_grid(custom_grid[0], custom_grid[1])
+            size = self._current_input_source_size()
+            if self.conform_to_layout_var.get() and size is not None:
+                try:
+                    layout = self._current_layout_geometry(size)
+                except ValueError:
+                    pass
+                else:
+                    text += f"\nTiles: {layout.tile_orientation.title()} (Auto)\nFill ratio: {layout.target_ratio:.3f}"
+            return text
         try:
             return tooltip_text_for_format(self.target_var.get())
         except ValueError:
@@ -1001,7 +1015,7 @@ class GuidecutApp(tk.Tk):
         self._last_preview_display_box = (0, 0, 0, 0)
         self._last_preview_working_size = (0, 0)
         self._last_preview_grid = (1, 1)
-        self._expand_drag_active = False
+        self._conform_drag_active = False
         self._clear_transform_drag()
 
     def _cancel_contrast_refresh(self) -> None:
@@ -1120,6 +1134,9 @@ class GuidecutApp(tk.Tk):
         if not self.custom_grid_var.get():
             self._custom_grid_initialized = False
         self.info_tooltip.refresh()
+        self._update_conform_slider_state()
+        self._clear_transform_drag()
+        self._conform_drag_active = False
         self._clamp_transform_block_to_current_grid(rerender=False)
         if self.show_preview_var.get() and self._preview_source_image is not None:
             self._invalidate_guide_style_cache()
@@ -1127,6 +1144,9 @@ class GuidecutApp(tk.Tk):
 
     def _on_custom_grid_value_changed(self, *_args) -> None:
         self.info_tooltip.refresh()
+        self._update_conform_slider_state()
+        self._clear_transform_drag()
+        self._conform_drag_active = False
         self._clamp_transform_block_to_current_grid(rerender=False)
         if self.custom_grid_var.get() and self.show_preview_var.get() and self._preview_source_image is not None:
             self._invalidate_guide_style_cache()
@@ -1134,33 +1154,40 @@ class GuidecutApp(tk.Tk):
             self._schedule_contrast_refresh()
 
     def _on_input_path_changed(self, *_args) -> None:
-        self._sync_expand_document_state()
-        self._update_expand_slider_state()
+        self._sync_conform_document_state()
+        self._update_conform_slider_state()
         self._sync_preview_controls()
 
     def _on_preview_toggle(self) -> None:
         self._sync_preview_controls()
 
-    def _current_source_orientation(self) -> str | None:
+    def _current_input_source_size(self) -> tuple[int, int] | None:
         file_path = resolve_existing_input_file(self.input_var.get())
         if file_path is None:
             return None
 
-        width_px: int | None = None
-        height_px: int | None = None
         if self._preview_source_path == file_path and self._preview_source_image is not None:
-            width_px, height_px = self._preview_source_size or self._preview_source_image.size
-        else:
-            try:
-                with Image.open(file_path) as image:
-                    width_px, height_px = image.size
-            except Exception:  # noqa: BLE001
-                return None
-        if width_px is None or height_px is None:
+            return self._preview_source_size or self._preview_source_image.size
+        try:
+            return oriented_source_size(file_path)
+        except Exception:  # noqa: BLE001
             return None
-        if width_px > height_px:
-            return "landscape"
-        return "portrait"
+
+    def _current_source_orientation(self) -> str | None:
+        size = self._current_input_source_size()
+        return ("landscape" if size[0] > size[1] else "portrait") if size is not None else None
+
+    def _current_layout_geometry(self, source_size: tuple[int, int]):
+        if self.custom_grid_var.get():
+            cols, rows = self._active_custom_grid_values(strict=True)
+            target = None
+        else:
+            cols, rows = None, None
+            target = self.target_var.get()
+        return layout_for_source(
+            *source_size, target_format=target, custom_grid_cols=cols, custom_grid_rows=rows,
+            conform_to_layout=self.conform_to_layout_var.get(), bias_percent=self.conform_bias_var.get(),
+        )
 
     def _initialize_custom_grid_from_target(self) -> None:
         try:
@@ -1207,6 +1234,9 @@ class GuidecutApp(tk.Tk):
             self._initialize_custom_grid_from_target()
         self._toggle_custom_grid_controls()
         self.info_tooltip.refresh()
+        self._update_conform_slider_state()
+        self._clear_transform_drag()
+        self._conform_drag_active = False
         self._clamp_transform_block_to_current_grid(rerender=False)
         if self._preview_panel_visible and self._preview_source_image is not None:
             self._invalidate_guide_style_cache()
@@ -1413,100 +1443,107 @@ class GuidecutApp(tk.Tk):
             valid = {(0, 0)}
         self._set_transform_selection(valid, rerender=rerender)
 
-    def _on_expand_toggle(self) -> None:
-        self._toggle_expand_controls()
-        self._update_expand_slider_state()
-        self._expand_drag_active = False
+    def _on_conform_toggle(self) -> None:
+        self._toggle_conform_controls()
+        self._update_conform_slider_state()
+        self._conform_drag_active = False
+        self._clear_transform_drag()
+        self.info_tooltip.refresh()
         if self._preview_panel_visible and self._preview_source_image is not None:
             self._invalidate_guide_style_cache()
             self._render_preview(compute_contrast=False)
             self._schedule_contrast_refresh()
 
-    def _on_expand_bias_scale(self, value: str) -> None:
+    def _on_conform_bias_scale(self, value: str) -> None:
         try:
             parsed = float(value)
         except ValueError:
             return
-        self._set_expand_bias_percent(parsed, rerender=True, fast_preview=True)
+        self._set_conform_bias_percent(parsed, rerender=True, fast_preview=True)
 
-    def _sync_expand_document_state(self) -> None:
+    def _sync_conform_document_state(self) -> None:
         file_path = resolve_existing_input_file(self.input_var.get())
         document_key = str(file_path) if file_path is not None else None
         if document_key is None:
-            bias_not_default = abs(float(self.expand_bias_var.get()) - EXPAND_DEFAULT_BIAS_PERCENT) > 1e-6
-            if self._active_input_document is not None or self.expand_to_format_var.get() or bias_not_default:
+            bias_not_default = abs(float(self.conform_bias_var.get()) - CONFORM_DEFAULT_BIAS_PERCENT) > 1e-6
+            if self._active_input_document is not None or self.conform_to_layout_var.get() or bias_not_default:
                 self._active_input_document = None
-                self._reset_expand_state_for_document()
+                self._reset_conform_state_for_document()
             return
         if document_key == self._active_input_document:
             return
         self._active_input_document = document_key
-        self._reset_expand_state_for_document()
+        self._reset_conform_state_for_document()
 
-    def _reset_expand_state_for_document(self) -> None:
-        self.expand_to_format_var.set(False)
-        self._set_expand_bias_percent(EXPAND_DEFAULT_BIAS_PERCENT, rerender=False, fast_preview=False)
-        self._toggle_expand_controls()
-        self._expand_drag_active = False
+    def _reset_conform_state_for_document(self) -> None:
+        self.conform_to_layout_var.set(False)
+        self._set_conform_bias_percent(CONFORM_DEFAULT_BIAS_PERCENT, rerender=False, fast_preview=False)
+        self._toggle_conform_controls()
+        self._conform_drag_active = False
 
-    def _toggle_expand_controls(self) -> None:
-        if self.expand_to_format_var.get():
-            self.expand_row.grid()
+    def _toggle_conform_controls(self) -> None:
+        if self.conform_to_layout_var.get():
+            self.conform_row.grid()
         else:
-            self.expand_row.grid_remove()
-        self._update_expand_slider_state()
+            self.conform_row.grid_remove()
+        self._update_conform_slider_state()
 
-    def _set_expand_bias_percent(self, value: float, *, rerender: bool, fast_preview: bool) -> None:
-        clamped = clamp_expand_bias_percent(value, default=EXPAND_DEFAULT_BIAS_PERCENT)
-        current = float(self.expand_bias_var.get())
+    def _set_conform_bias_percent(self, value: float, *, rerender: bool, fast_preview: bool) -> None:
+        clamped = clamp_conform_bias_percent(value, default=CONFORM_DEFAULT_BIAS_PERCENT)
+        current = float(self.conform_bias_var.get())
         if abs(current - clamped) > 1e-6:
-            self.expand_bias_var.set(clamped)
-        self.expand_bias_label_var.set(f"Trim bias: {clamped:.1f}%")
+            self.conform_bias_var.set(clamped)
+        self.conform_bias_label_var.set(f"Trim bias: {clamped:.1f}%")
         if rerender and self._preview_panel_visible and self._preview_source_image is not None:
             self._invalidate_guide_style_cache()
             self._render_preview(compute_contrast=not fast_preview)
             if fast_preview:
                 self._schedule_contrast_refresh()
 
-    def _current_expand_crop_info(self):
-        file_path = resolve_existing_input_file(self.input_var.get())
-        if file_path is None:
+    def _current_conform_crop_info(self):
+        size = self._current_input_source_size()
+        if size is None:
             return None
-
-        if self._preview_source_path == file_path and self._preview_source_image is not None:
-            width_px, height_px = self._preview_source_size or self._preview_source_image.size
-            return expand_crop_for_source(width_px, height_px, self.expand_bias_var.get())
-
         try:
-            with Image.open(file_path) as image:
-                width_px, height_px = image.size
-        except Exception:  # noqa: BLE001
+            return self._current_layout_geometry(size).crop
+        except ValueError:
             return None
-        return expand_crop_for_source(width_px, height_px, self.expand_bias_var.get())
 
-    def _update_expand_slider_state(self) -> None:
-        if not hasattr(self, "expand_scale"):
+    def _update_conform_slider_state(self) -> None:
+        if not hasattr(self, "conform_scale"):
             return
 
-        if not self.expand_to_format_var.get():
-            self.expand_scale.state(["disabled"])
-            self.expand_bias_label.configure(text="Trim Bias")
+        self.custom_tile_orientation_label.grid_remove()
+        if not self.conform_to_layout_var.get():
+            self.conform_scale.state(["disabled"])
+            self.conform_bias_label.configure(text="Trim Bias")
             return
 
-        crop_info = self._current_expand_crop_info()
+        crop_info = self._current_conform_crop_info()
+        if self.custom_grid_var.get():
+            self.custom_tile_orientation_var.set("Tiles: pending")
+            self.custom_tile_orientation_label.grid()
+            size = self._current_input_source_size()
+            if size is not None:
+                try:
+                    layout = self._current_layout_geometry(size)
+                except ValueError:
+                    pass
+                else:
+                    self.custom_tile_orientation_var.set(f"Tiles: {layout.tile_orientation.title()} (Auto)")
         if crop_info is None:
-            self.expand_scale.state(["!disabled"])
-            self.expand_bias_label.configure(text="Trim Bias")
+            self.conform_scale.state(["disabled"])
+            self.conform_bias_label.configure(text="Trim Bias (Select a valid layout)")
             return
 
         if crop_info.axis is None or crop_info.excess_px <= 0:
-            self.expand_scale.state(["disabled"])
-            self.expand_bias_label.configure(text="Trim Bias (No excess edge)")
+            self.conform_scale.state(["disabled"])
+            self.conform_bias_label.configure(text="Trim Bias (No excess edge)")
             return
 
-        self.expand_scale.state(["!disabled"])
+        self.conform_scale.state(["!disabled"])
         axis_label = "Left/Right Trim" if crop_info.axis == "x" else "Top/Bottom Trim"
-        self.expand_bias_label.configure(text=axis_label)
+        self.conform_bias_label.configure(text=axis_label)
 
     def _sync_preview_controls(self) -> None:
         toggle_visible, preview_enabled, file_path = effective_preview_state(
@@ -1620,7 +1657,7 @@ class GuidecutApp(tk.Tk):
         self._preview_autofit_pending = True
         self._clamp_transform_block_to_current_grid(rerender=False)
         self._invalidate_guide_style_cache()
-        self._update_expand_slider_state()
+        self._update_conform_slider_state()
         self._render_preview(compute_contrast=True)
 
     def _handle_preview_error(self, payload: dict[str, object]) -> None:
@@ -1642,11 +1679,12 @@ class GuidecutApp(tk.Tk):
         return (
             self._preview_panel_visible
             and not self.transform_cut_var.get()
-            and self.expand_to_format_var.get()
+            and self.conform_to_layout_var.get()
             and self._preview_source_image is not None
             and crop_info is not None
             and crop_info.axis in {"x", "y"}
             and crop_info.excess_px > 0
+            and (not self.custom_grid_var.get() or self._active_custom_grid_values(strict=False) is not None)
         )
 
     def _preview_point_in_image(self, event: tk.Event) -> bool:
@@ -1669,6 +1707,8 @@ class GuidecutApp(tk.Tk):
         self._clear_transform_drag()
         if not self.transform_cut_var.get() or not self._preview_point_in_image(event):
             return
+        if self._current_transform_grid() is None:
+            return
         try:
             options = self._current_transform_options(strict=True)
         except ValueError:
@@ -1681,30 +1721,30 @@ class GuidecutApp(tk.Tk):
 
     def _on_preview_drag_start(self, event: tk.Event) -> None:
         if self.transform_cut_var.get():
-            self._expand_drag_active = False
+            self._conform_drag_active = False
             self._start_transform_drag("move", event)
             return
 
         if not self._preview_drag_is_available():
-            self._expand_drag_active = False
+            self._conform_drag_active = False
             return
 
         offset_x, offset_y, display_w, display_h = self._last_preview_display_box
         if not (offset_x <= event.x <= offset_x + display_w and offset_y <= event.y <= offset_y + display_h):
-            self._expand_drag_active = False
+            self._conform_drag_active = False
             return
 
         crop_info = self._last_preview_crop_info
         if crop_info is None:
-            self._expand_drag_active = False
+            self._conform_drag_active = False
             return
 
-        self._expand_drag_active = True
-        self._expand_drag_axis = crop_info.axis
-        self._expand_drag_start_pointer = int(event.x if crop_info.axis == "x" else event.y)
-        self._expand_drag_start_leading_trim = int(crop_info.leading_trim_px)
-        self._expand_drag_excess = int(crop_info.excess_px)
-        self._expand_drag_display_length = max(1, int(display_w if crop_info.axis == "x" else display_h))
+        self._conform_drag_active = True
+        self._conform_drag_axis = crop_info.axis
+        self._conform_drag_start_pointer = int(event.x if crop_info.axis == "x" else event.y)
+        self._conform_drag_start_leading_trim = int(crop_info.leading_trim_px)
+        self._conform_drag_excess = int(crop_info.excess_px)
+        self._conform_drag_display_length = max(1, int(display_w if crop_info.axis == "x" else display_h))
 
     def _on_preview_drag_motion(self, event: tk.Event) -> None:
         if self._transform_drag_mode == "move" and self._transform_drag_start_options is not None:
@@ -1725,25 +1765,25 @@ class GuidecutApp(tk.Tk):
             self._set_transform_control_values(offset_x=offset_x, offset_y=offset_y)
             return
 
-        if not self._expand_drag_active or self._expand_drag_axis not in {"x", "y"}:
+        if not self._conform_drag_active or self._conform_drag_axis not in {"x", "y"}:
             return
-        if self._expand_drag_excess <= 0 or self._expand_drag_display_length <= 0:
+        if self._conform_drag_excess <= 0 or self._conform_drag_display_length <= 0:
             return
 
-        pointer = int(event.x if self._expand_drag_axis == "x" else event.y)
-        delta_display = pointer - self._expand_drag_start_pointer
-        delta_trim = int(round((delta_display / self._expand_drag_display_length) * self._expand_drag_excess))
-        leading_trim = self._expand_drag_start_leading_trim + delta_trim
-        leading_trim = max(0, min(self._expand_drag_excess, leading_trim))
-        new_bias = (leading_trim / self._expand_drag_excess) * 100.0
-        self._set_expand_bias_percent(new_bias, rerender=True, fast_preview=True)
+        pointer = int(event.x if self._conform_drag_axis == "x" else event.y)
+        delta_display = pointer - self._conform_drag_start_pointer
+        delta_trim = int(round((delta_display / self._conform_drag_display_length) * self._conform_drag_excess))
+        leading_trim = self._conform_drag_start_leading_trim + delta_trim
+        leading_trim = max(0, min(self._conform_drag_excess, leading_trim))
+        new_bias = (leading_trim / self._conform_drag_excess) * 100.0
+        self._set_conform_bias_percent(new_bias, rerender=True, fast_preview=True)
 
     def _on_preview_drag_end(self, event: tk.Event) -> None:
         if self._transform_drag_mode == "move" and not self._transform_drag_moved:
             self._select_transform_block_from_preview(event)
         self._clear_transform_drag()
-        self._expand_drag_active = False
-        self._expand_drag_axis = None
+        self._conform_drag_active = False
+        self._conform_drag_axis = None
 
     def _on_preview_rotate_start(self, event: tk.Event) -> None:
         if self.transform_cut_var.get() and getattr(event, "state", 0) & 0x0004:
@@ -1855,53 +1895,31 @@ class GuidecutApp(tk.Tk):
             self._set_preview_status("Unable to preview file: invalid image dimensions.")
             return
 
-        crop_info = None
-        working_image = self._preview_source_image
-        owns_working_image = False
-        if self.expand_to_format_var.get():
-            crop_info = expand_crop_for_source(source_w, source_h, self.expand_bias_var.get())
-            if crop_info.excess_px > 0:
-                preview_crop_box = scaled_preview_crop_box(
-                    crop_info.rect,
-                    (source_w, source_h),
-                    self._preview_source_image.size,
-                )
-                working_image = self._preview_source_image.crop(preview_crop_box)
-                owns_working_image = True
-
-        working_w, working_h = (
-            (crop_info.rect.x1 - crop_info.rect.x0, crop_info.rect.y1 - crop_info.rect.y0)
-            if crop_info is not None and crop_info.excess_px > 0
-            else (source_w, source_h)
-        )
+        try:
+            layout = self._current_layout_geometry((source_w, source_h))
+        except ValueError as exc:
+            self._set_preview_status(f"Select a valid layout: {exc}")
+            return
+        crop_info = layout.crop
+        working_w, working_h = layout.size
         transform_options = self._current_transform_options(strict=False)
-        preview_image = working_image
-        if transform_options.enabled:
-            preview_options = scale_transform_for_preview(
-                transform_options.to_cli_options(),
-                (working_w, working_h),
-                working_image.size,
+        transform_key = (
+            id(self._preview_source_image), (source_w, source_h), layout.frame.box,
+            transform_options.offset_x_px, transform_options.offset_y_px,
+            transform_options.rotation_deg, transform_options.scale,
+        )
+        if self._preview_transform_key != transform_key or self._preview_transformed_image is None:
+            self._close_preview_transform_cache()
+            self._preview_transformed_image = render_layout_preview(
+                self._preview_source_image, (source_w, source_h), layout, transform_options,
             )
-            transform_key = (
-                id(self._preview_source_image),
-                crop_info.rect.box if crop_info is not None else None,
-                preview_options.offset_x_px,
-                preview_options.offset_y_px,
-                preview_options.rotation_deg,
-                preview_options.scale,
-            )
-            if self._preview_transform_key != transform_key or self._preview_transformed_image is None:
-                self._close_preview_transform_cache()
-                self._preview_transformed_image = render_transformed_source(working_image, preview_options)
-                self._preview_transform_key = transform_key
-            preview_image = self._preview_transformed_image
+            self._preview_transform_key = transform_key
+        preview_image = self._preview_transformed_image
 
         if self._preview_autofit_pending:
             canvas_w = self.preview_canvas.winfo_width()
             canvas_h = self.preview_canvas.winfo_height()
             if canvas_w <= 4 or canvas_h <= 4:
-                if owns_working_image:
-                    working_image.close()
                 return
             initial_scale = min(canvas_w / working_w, canvas_h / working_h)
             initial_display_w = max(1, int(working_w * initial_scale))
@@ -1911,8 +1929,6 @@ class GuidecutApp(tk.Tk):
         canvas_w = self.preview_canvas.winfo_width()
         canvas_h = self.preview_canvas.winfo_height()
         if canvas_w <= 4 or canvas_h <= 4:
-            if owns_working_image:
-                working_image.close()
             return
 
         scale = min(canvas_w / working_w, canvas_h / working_h)
@@ -1930,23 +1946,8 @@ class GuidecutApp(tk.Tk):
         self._last_preview_crop_info = crop_info
 
         custom_grid = self._active_custom_grid_values(strict=False)
-        if self.custom_grid_var.get() and custom_grid is not None:
-            cols, rows, vertical_guides, horizontal_guides = preview_guides_for_source(
-                working_w,
-                working_h,
-                target_format=None,
-                custom_grid_cols=custom_grid[0],
-                custom_grid_rows=custom_grid[1],
-            )
-        elif self.custom_grid_var.get():
-            cols, rows = 1, 1
-            vertical_guides, horizontal_guides = [], []
-        else:
-            cols, rows, vertical_guides, horizontal_guides = preview_guides_for_source(
-                working_w,
-                working_h,
-                self.target_var.get(),
-            )
+        cols, rows = layout.cols, layout.rows
+        vertical_guides, horizontal_guides = compute_guides(working_w, working_h, cols, rows)
         self._last_preview_grid = (cols, rows)
         ratio_x = display_w / working_w
         ratio_y = display_h / working_h
@@ -2068,11 +2069,11 @@ class GuidecutApp(tk.Tk):
         )
         source_name = self._preview_source_path.name if self._preview_source_path is not None else "Preview"
         status_text = f"{source_name} ({working_w}x{working_h}px) | Grid {cols}x{rows}"
-        if self.custom_grid_var.get() and custom_grid is None:
-            status_text += f" | Custom grid requires cols/rows {CUSTOM_GRID_MIN}-{CUSTOM_GRID_MAX}"
-        if self.expand_to_format_var.get() and crop_info is not None and crop_info.excess_px > 0:
+        if self.conform_to_layout_var.get() and self.custom_grid_var.get():
+            status_text += f" | Tiles: {layout.tile_orientation.title()} (Auto)"
+        if self.conform_to_layout_var.get() and crop_info is not None and crop_info.excess_px > 0:
             axis = "left/right" if crop_info.axis == "x" else "top/bottom"
-            status_text += f" | Expanded trim {crop_info.excess_px}px ({axis})"
+            status_text += f" | Fill trim {crop_info.excess_px}px ({axis})"
         if transform_options.enabled:
             status_text += (
                 f" | Selected {len(self._selected_transform_blocks)}/{cols * rows} blocks"
@@ -2080,8 +2081,6 @@ class GuidecutApp(tk.Tk):
             )
             status_text += " | Click: one; Ctrl+click: toggle; drag: move; right-drag: rotate; wheel: zoom"
         self._set_preview_status(status_text)
-        if owns_working_image:
-            working_image.close()
 
     def _autofit_preview_panel_to_image(self, display_width_px: int, canvas_width_px: int) -> None:
         if not self._preview_panel_visible:
@@ -2120,9 +2119,9 @@ class GuidecutApp(tk.Tk):
         self.specify_output_var.set(bool(state["specify_output_dir"]))
         self.output_dir_var.set(state["output_dir"])
         self.input_var.set(state["input_dir"])
-        self.expand_to_format_var.set(bool(state["expand_to_format"]))
-        self.expand_bias_var.set(float(state["expand_bias_percent"]))
-        self.expand_bias_label_var.set(f"Trim bias: {float(state['expand_bias_percent']):.1f}%")
+        self.conform_to_layout_var.set(bool(state["conform_to_layout"]))
+        self.conform_bias_var.set(float(state["conform_bias_percent"]))
+        self.conform_bias_label_var.set(f"Trim bias: {float(state['conform_bias_percent']):.1f}%")
         self._pending_window_geometry = state["window_geometry"]
         self._preview_split_ratio = float(state["preview_split_ratio"])
 
@@ -2165,8 +2164,8 @@ class GuidecutApp(tk.Tk):
                 input_dir=self.input_var.get(),
                 window_geometry=window_geometry,
                 preview_split_ratio=self._preview_split_ratio,
-                expand_to_format=self.expand_to_format_var.get(),
-                expand_bias_percent=self.expand_bias_var.get(),
+                conform_to_layout=self.conform_to_layout_var.get(),
+                conform_bias_percent=self.conform_bias_var.get(),
             )
         except RuntimeError as exc:
             self._append_status(f"Warning: {exc}")
@@ -2243,19 +2242,21 @@ class GuidecutApp(tk.Tk):
         else:
             target = normalize_target_format(self.target_var.get())
             custom_cols, custom_rows = None, None
-        expand_enabled = bool(self.expand_to_format_var.get())
-        expand_bias = clamp_expand_bias_percent(self.expand_bias_var.get(), default=EXPAND_DEFAULT_BIAS_PERCENT)
+        conform_enabled = bool(self.conform_to_layout_var.get())
+        conform_bias = clamp_conform_bias_percent(self.conform_bias_var.get(), default=CONFORM_DEFAULT_BIAS_PERCENT)
+        source_size = self._current_input_source_size()
+        if source_size is None:
+            self.input_field.set_error(True)
+            raise ValueError("Unable to read the selected image.")
+        layout = self._current_layout_geometry(source_size)
         transform_options = self._current_transform_options(strict=True)
         transform_blocks = None
         if transform_options.enabled:
-            grid = self._current_transform_grid()
-            if grid is None:
-                raise ValueError("Select a valid grid before running transform cut.")
-            transform_blocks = tuple(ordered_selected_blocks(self._selected_transform_blocks, *grid))
+            transform_blocks = tuple(ordered_selected_blocks(self._selected_transform_blocks, layout.cols, layout.rows))
 
         if not self.specify_output_var.get():
             return (
-                input_path, target, None, expand_enabled, expand_bias,
+                input_path, target, None, conform_enabled, conform_bias,
                 custom_cols, custom_rows, transform_options, transform_blocks,
             )
 
@@ -2282,7 +2283,7 @@ class GuidecutApp(tk.Tk):
             transform_blocks=transform_blocks,
         )
         return (
-            input_path, target, output_pdf, expand_enabled, expand_bias,
+            input_path, target, output_pdf, conform_enabled, conform_bias,
             custom_cols, custom_rows, transform_options, transform_blocks,
         )
 
@@ -2296,8 +2297,8 @@ class GuidecutApp(tk.Tk):
                 input_path,
                 target,
                 output_path,
-                expand_enabled,
-                expand_bias,
+                conform_enabled,
+                conform_bias,
                 custom_cols,
                 custom_rows,
                 transform_options,
@@ -2313,8 +2314,8 @@ class GuidecutApp(tk.Tk):
             input_path=input_path,
             target_format=target,
             output_path=output_path,
-            expand_to_format=expand_enabled,
-            expand_bias_percent=expand_bias,
+            conform_to_layout=conform_enabled,
+            conform_bias_percent=conform_bias,
             custom_grid_cols=custom_cols,
             custom_grid_rows=custom_rows,
             transform_cut=transform_options.enabled,
@@ -2337,8 +2338,8 @@ class GuidecutApp(tk.Tk):
             self._append_status(f"Preset target mode: {target.upper()}")
         if output_path is not None:
             self._append_status(f"Explicit output path: {output_path}")
-        if expand_enabled:
-            self._append_status(f"Expand to format enabled (bias={expand_bias:.1f}%).")
+        if conform_enabled:
+            self._append_status(f"Conform to layout enabled (bias={conform_bias:.1f}%).")
         if transform_options.enabled:
             self._append_status(
                 "Transform cut enabled: "
@@ -2405,7 +2406,7 @@ class GuidecutApp(tk.Tk):
                 else:
                     self.input_var.set("")
                 self._active_input_document = None
-                self._reset_expand_state_for_document()
+                self._reset_conform_state_for_document()
                 self.input_entry.focus_set()
             elif channel == "preview_loaded":
                 if isinstance(payload, dict):
